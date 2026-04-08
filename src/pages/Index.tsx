@@ -477,7 +477,7 @@ export default function Index() {
               <div
                 ref={previewRef}
                 className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden"
-                style={{ height: 200, cursor: selectionMode ? "crosshair" : "default" }}
+                style={{ height: "calc(100vh - 320px)", minHeight: 360, cursor: selectionMode ? "crosshair" : "default" }}
                 onMouseDown={e => {
                   if (!selectionMode) return;
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -708,7 +708,7 @@ export default function Index() {
           </div> {/* конец левой колонки */}
 
           {/* ── ПРАВАЯ КОЛОНКА: История событий ── */}
-          <div className="glass-card rounded-xl flex flex-col" style={{ maxHeight: "80vh" }}>
+          <div className="glass-card rounded-xl flex flex-col sticky top-28" style={{ height: "calc(100vh - 180px)", minHeight: 500 }}>
             <div className="px-4 pt-4 pb-3 border-b border-white/5 flex items-center justify-between flex-shrink-0">
               <div className="flex items-center gap-2">
                 <Icon name="Clock" size={13} className="text-neon-green" />
