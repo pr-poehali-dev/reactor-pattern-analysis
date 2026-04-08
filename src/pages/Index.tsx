@@ -87,32 +87,48 @@ export default function Index() {
 
   const startCapture = useCallback(async () => {
     setCaptureError(null);
+    const logs: string[] = [];
+
+    logs.push(`[1] isSecureContext: ${window.isSecureContext}`);
+    logs.push(`[2] protocol: ${location.protocol}`);
+    logs.push(`[3] navigator.mediaDevices: ${!!navigator.mediaDevices}`);
+    logs.push(`[4] getDisplayMedia: ${typeof navigator.mediaDevices?.getDisplayMedia}`);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      setCaptureError("getDisplayMedia не поддерживается в этом браузере. Используй Chrome или Edge.");
+      logs.push("[5] СТОП: getDisplayMedia недоступен");
+      setCaptureError(logs.join("\n"));
       return;
     }
+
+    logs.push("[5] Вызываю getDisplayMedia...");
+    setCaptureError(logs.join("\n"));
 
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
       });
+      logs.push("[6] Стрим получен ✓");
+      logs.push(`[7] Треки: ${stream.getTracks().map(t => t.kind + "/" + t.label).join(", ")}`);
+      setCaptureError(logs.join("\n"));
+
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        logs.push("[8] srcObject установлен ✓");
+      } else {
+        logs.push("[8] ОШИБКА: videoRef.current = null");
       }
+      setCaptureError(logs.join("\n"));
+
       stream.getVideoTracks()[0].addEventListener("ended", stopCapture);
       setCapturing(true);
+      setCaptureError(null);
     } catch (e: unknown) {
       const err = e as Error;
-      if (err.name === "NotAllowedError") {
-        setCaptureError("Доступ запрещён — нажми «Разрешить» в диалоге браузера, либо открой сайт напрямую (не в iframe).");
-      } else if (err.name === "NotSupportedError") {
-        setCaptureError("Браузер не поддерживает захват экрана. Попробуй Chrome 72+.");
-      } else {
-        setCaptureError(`Ошибка: ${err.name} — ${err.message}`);
-      }
+      logs.push(`[6] ОШИБКА: ${err.name} — ${err.message}`);
+      logs.push(`[7] stack: ${err.stack?.split("\n")[1] ?? "—"}`);
+      setCaptureError(logs.join("\n"));
     }
   }, [stopCapture]);
 
@@ -336,7 +352,7 @@ export default function Index() {
               </div>
 
               {captureError && (
-                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed">
+                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed whitespace-pre-wrap">
                   {captureError}
                 </div>
               )}
