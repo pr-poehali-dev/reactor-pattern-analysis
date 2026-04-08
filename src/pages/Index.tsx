@@ -579,60 +579,6 @@ export default function Index() {
             </div>
             )}
 
-            {/* ── Полосы статистики под превью ── */}
-            {totalRounds > 0 && (
-              <div className="glass-card rounded-xl px-4 py-3 space-y-3">
-                {/* Баланс α/ω */}
-                <div>
-                  <div className="flex justify-between mb-1.5">
-                    <span className="font-mono text-xs text-cyan-400">α Альфа {Math.round(alphaWins / totalRounds * 100)}%</span>
-                    <span className="font-mono text-xs text-purple-400">ω Омега {Math.round(omegaWins / totalRounds * 100)}%</span>
-                  </div>
-                  <div className="h-3 rounded-full bg-white/5 overflow-hidden flex">
-                    <div
-                      className="h-full transition-all duration-700"
-                      style={{ width: `${(alphaWins / totalRounds) * 100}%`, background: "linear-gradient(90deg, #22d3ee99, #22d3ee44)" }}
-                    />
-                    <div
-                      className="h-full flex-1"
-                      style={{ background: "linear-gradient(90deg, #c084fc44, #c084fc99)" }}
-                    />
-                  </div>
-                </div>
-
-                {/* Последние 10 событий */}
-                <div>
-                  <div className="flex justify-between mb-1.5">
-                    <span className="font-mono text-xs text-white/30 uppercase tracking-widest">Последние 10 событий</span>
-                    <span className="font-mono text-xs text-white/20">{history.length} всего</span>
-                  </div>
-                  <div className="flex gap-1.5">
-                    {history.length < 10 && Array.from({ length: 10 - history.length }).map((_, i) => (
-                      <div key={`empty-${i}`} className="flex-1 h-7 rounded bg-white/5 border border-white/5" />
-                    ))}
-                    {[...history].slice(-10).map((r, i, arr) => (
-                      <div
-                        key={r.id}
-                        title={`#${r.id}: ${r.winner === "alpha" ? "Альфа" : "Омега"}`}
-                        className="flex-1 h-7 rounded flex items-center justify-center font-display text-xs transition-all hover:scale-110 cursor-default"
-                        style={{
-                          background: r.winner === "alpha" ? "rgba(34,211,238,0.18)" : "rgba(192,132,252,0.18)",
-                          border: `1px solid ${r.winner === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)"}`,
-                          color: r.winner === "alpha" ? "#22d3ee" : "#c084fc",
-                          boxShadow: i === arr.length - 1
-                            ? `0 0 10px ${r.winner === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)"}`
-                            : "none",
-                          opacity: 0.4 + (i / arr.length) * 0.6,
-                        }}
-                      >
-                        {r.winner === "alpha" ? "α" : "ω"}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* Живой анализ пикселей */}
             {capturing && lastFrame && (
               <div className="grid grid-cols-2 gap-4">
@@ -830,7 +776,20 @@ export default function Index() {
               </div>
             )}
 
-
+            {totalRounds > 0 && (
+              <div className="px-4 py-3 border-t border-white/5 flex-shrink-0">
+                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${(alphaWins / totalRounds) * 100}%`, background: "linear-gradient(90deg, #22d3ee, #c084fc)" }}
+                  />
+                </div>
+                <div className="flex justify-between mt-1">
+                  <span className="font-mono text-xs text-cyan-400/60">α {Math.round(alphaWins / totalRounds * 100)}%</span>
+                  <span className="font-mono text-xs text-purple-400/60">ω {Math.round(omegaWins / totalRounds * 100)}%</span>
+                </div>
+              </div>
+            )}
           </div>
           </div>
         )}
