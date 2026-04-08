@@ -5,7 +5,7 @@ import { predict, getTopPatterns } from "@/lib/mlPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
 
-type Tab = "capture" | "prediction" | "stats" | "model";
+type Tab = "capture" | "model";
 
 function fmt(ts: number) {
   return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -215,19 +215,27 @@ export default function Index() {
         setRoundPhase("result");
 
         const flickerStats = computeFlickerStats(flickerBufRef.current);
-        const newResult: RoundResult = {
-          id: roundIdRef.current++,
-          winner: frame.winner,
-          timestamp: now,
-          flickerPattern: [...flickerBufRef.current],
-          flickerRate: flickerStats.rate,
-          flickerBias: flickerStats.bias,
-        };
 
         setHistory(prev => {
+          // Берём прогноз который был ДО этого раунда
+          const prevPred = predict(prev, flickerStats.bias, flickerStats.rate);
+          const predictedBefore = prevPred.reactor;
+          const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
+
+          const newResult: RoundResult = {
+            id: roundIdRef.current++,
+            winner: frame.winner,
+            timestamp: now,
+            flickerPattern: [...flickerBufRef.current],
+            flickerRate: flickerStats.rate,
+            flickerBias: flickerStats.bias,
+            predictedBefore,
+            predictionHit,
+          };
+
           const next = [...prev, newResult];
-          const pred = predict(next, flickerStats.bias, flickerStats.rate);
-          setPrediction(pred);
+          const nextPred = predict(next, flickerStats.bias, flickerStats.rate);
+          setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
           return next;
         });
@@ -264,8 +272,6 @@ export default function Index() {
 
   const TABS: { id: Tab; icon: string; label: string }[] = [
     { id: "capture", icon: "Monitor", label: "Захват" },
-    { id: "prediction", icon: "Zap", label: "Предсказание" },
-    { id: "stats", icon: "BarChart2", label: "Статистика" },
     { id: "model", icon: "Cpu", label: "Модель ML" },
   ];
 
@@ -739,14 +745,29 @@ export default function Index() {
                       border: `1px solid ${i === 0 ? (r.winner === "alpha" ? "rgba(34,211,238,0.25)" : "rgba(192,132,252,0.25)") : "transparent"}`,
                     }}
                   >
-                    <span className="text-white/20 w-6 flex-shrink-0">#{r.id}</span>
-                    <span
-                      className="font-bold w-16 flex-shrink-0"
-                      style={{ color: r.winner === "alpha" ? "#22d3ee" : "#c084fc" }}
-                    >
+                    <span className="text-white/20 w-5 flex-shrink-0">#{r.id}</span>
+                    <span className="font-bold w-14 flex-shrink-0" style={{ color: r.winner === "alpha" ? "#22d3ee" : "#c084fc" }}>
                       {r.winner === "alpha" ? "α Альфа" : "ω Омега"}
                     </span>
-                    <span className="text-white/35 flex-1">{fmt(r.timestamp)}</span>
+                    <span className="text-white/30 flex-1">{fmt(r.timestamp)}</span>
+                    {/* Прогноз до раунда */}
+                    {r.predictedBefore !== null ? (
+                      <span
+                        className="flex items-center gap-1 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
+                        style={{
+                          background: r.predictionHit ? "rgba(0,255,204,0.12)" : "rgba(244,63,94,0.12)",
+                          border: `1px solid ${r.predictionHit ? "rgba(0,255,204,0.3)" : "rgba(244,63,94,0.3)"}`,
+                          color: r.predictionHit ? "#00ffcc" : "#f43f5e",
+                        }}
+                      >
+                        {r.predictionHit ? "✓" : "✗"}
+                        <span style={{ color: r.predictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {r.predictedBefore === "alpha" ? "α" : "ω"}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-white/15 text-xs flex-shrink-0">—</span>
+                    )}
                     {i === 0 && (
                       <span className="text-neon-green animate-blink text-xs">▌</span>
                     )}
@@ -774,288 +795,6 @@ export default function Index() {
         )}
 
 
-
-        {/* ── ПРЕДСКАЗАНИЕ ── */}
-        {tab === "prediction" && (
-          <div className="space-y-5 animate-fade-in-up">
-            {!prediction || !prediction.reactor ? (
-              <div className="glass-card rounded-xl p-10 text-center">
-                <Icon name="Zap" size={36} className="text-white/10 mx-auto mb-3" />
-                <p className="font-mono text-sm text-white/30">Нужно минимум 2 раунда для предсказания</p>
-              </div>
-            ) : (
-              <>
-                <div className="grid sm:grid-cols-2 gap-5">
-                  {/* Предсказание */}
-                  <div
-                    className="rounded-xl p-6 border scan-line"
-                    style={{
-                      background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.07)" : "rgba(192,132,252,0.07)",
-                      borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.35)" : "rgba(192,132,252,0.35)",
-                    }}
-                  >
-                    <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-3">Следующий победитель</p>
-                    <div className="flex items-center gap-4">
-                      <div
-                        className="w-24 h-24 rounded-2xl flex items-center justify-center text-4xl font-display border"
-                        style={{
-                          background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.1)" : "rgba(192,132,252,0.1)",
-                          borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)",
-                          color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc",
-                          boxShadow: prediction.reactor === "alpha" ? "0 0 30px rgba(34,211,238,0.2)" : "0 0 30px rgba(192,132,252,0.2)",
-                        }}
-                      >
-                        {prediction.reactor === "alpha" ? "α" : "ω"}
-                      </div>
-                      <div>
-                        <p className="font-display text-2xl tracking-widest" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                          {prediction.reactor === "alpha" ? "АЛЬФА" : "ОМЕГА"}
-                        </p>
-                        <p className="font-mono text-xs text-white/40 mt-1 max-w-xs">{prediction.reason}</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Уверенность */}
-                  <div className="glass-card rounded-xl p-6">
-                    <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-3">Уверенность модели</p>
-                    <p className="font-display text-5xl text-neon-green mb-4" style={{ textShadow: "0 0 30px rgba(0,255,204,0.4)" }}>
-                      {Math.round(prediction.confidence * 100)}%
-                    </p>
-                    <ConfBar value={prediction.confidence} color="#00ffcc" />
-                    <div className="grid grid-cols-2 gap-3 mt-4">
-                      <div className="text-center p-2 rounded-lg bg-white/3">
-                        <p className="font-mono text-xs text-white/30 mb-1">Паттерн</p>
-                        <p className="font-mono text-xs text-neon-green">{prediction.patternMatch ? `${Math.round(prediction.patternMatch.confidence * 100)}%` : "нет"}</p>
-                      </div>
-                      <div className="text-center p-2 rounded-lg bg-white/3">
-                        <p className="font-mono text-xs text-white/30 mb-1">Мерцание</p>
-                        <p className="font-mono text-xs text-yellow-400">{prediction.flickerHint ? `${Math.round(prediction.flickerWeight * 100)}%` : "нет"}</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Паттерн */}
-                {prediction.patternMatch && (
-                  <div className="glass-card rounded-xl p-5">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Icon name="GitBranch" size={14} className="text-neon-green" />
-                      <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Совпавший паттерн</span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {prediction.patternMatch.sequence.map((r, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <div
-                            className="px-3 py-2 rounded-lg border text-center min-w-16"
-                            style={{
-                              background: r === "alpha" ? "rgba(34,211,238,0.1)" : "rgba(192,132,252,0.1)",
-                              borderColor: r === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
-                            }}
-                          >
-                            <span className="font-display text-lg" style={{ color: r === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                              {r === "alpha" ? "α" : "ω"}
-                            </span>
-                          </div>
-                          {i < prediction.patternMatch!.sequence.length - 1 && (
-                            <Icon name="ArrowRight" size={12} className="text-white/20" />
-                          )}
-                        </div>
-                      ))}
-                      <Icon name="ArrowRight" size={14} className="text-neon-green/60" />
-                      <div
-                        className="px-3 py-2 rounded-lg border text-center min-w-16 animate-pulse"
-                        style={{
-                          background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.15)" : "rgba(192,132,252,0.15)",
-                          borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.5)" : "rgba(192,132,252,0.5)",
-                        }}
-                      >
-                        <span className="font-display text-lg" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                          {prediction.reactor === "alpha" ? "α" : "ω"}
-                        </span>
-                      </div>
-                      <span className="font-mono text-xs text-white/30 ml-2">встречалось {prediction.patternMatch.count}×</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Последние раунды */}
-                <div className="glass-card rounded-xl p-5">
-                  <div className="flex items-center gap-2 mb-4">
-                    <Icon name="History" size={14} className="text-neon-green" />
-                    <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Последние раунды (контекст)</span>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    {history.slice(-10).map((r, i, arr) => (
-                      <div key={r.id} className="flex items-center gap-2">
-                        <div
-                          className="flex flex-col items-center px-2 py-1.5 rounded-lg border text-xs"
-                          style={{
-                            background: r.winner === "alpha" ? "rgba(34,211,238,0.08)" : "rgba(192,132,252,0.08)",
-                            borderColor: r.winner === "alpha" ? "rgba(34,211,238,0.25)" : "rgba(192,132,252,0.25)",
-                          }}
-                        >
-                          <span style={{ color: r.winner === "alpha" ? "#22d3ee" : "#c084fc" }} className="font-display text-base">
-                            {r.winner === "alpha" ? "α" : "ω"}
-                          </span>
-                          <span className="text-white/20 font-mono" style={{ fontSize: 9 }}>#{r.id}</span>
-                        </div>
-                        {i < arr.length - 1 && <Icon name="ChevronRight" size={10} className="text-white/15" />}
-                      </div>
-                    ))}
-                    <Icon name="ChevronRight" size={12} className="text-neon-green/40" />
-                    <div
-                      className="px-2 py-1.5 rounded-lg border text-xs animate-pulse"
-                      style={{
-                        borderStyle: "dashed",
-                        borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.5)" : "rgba(192,132,252,0.5)",
-                        background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.08)" : "rgba(192,132,252,0.08)",
-                      }}
-                    >
-                      <span style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }} className="font-display text-base">
-                        {prediction.reactor === "alpha" ? "α" : "ω"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ── СТАТИСТИКА ── */}
-        {tab === "stats" && (
-          <div className="space-y-5 animate-fade-in-up">
-            {/* Частота */}
-            <div className="grid sm:grid-cols-2 gap-5">
-              <div className="glass-card rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Icon name="BarChart2" size={14} className="text-neon-green" />
-                  <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Распределение побед</span>
-                </div>
-                <div className="space-y-4">
-                  {[
-                    { label: "α Альфа", wins: alphaWins, color: "#22d3ee" },
-                    { label: "ω Омега", wins: omegaWins, color: "#c084fc" },
-                  ].map(r => (
-                    <div key={r.label}>
-                      <div className="flex justify-between mb-1.5">
-                        <span className="font-mono text-sm" style={{ color: r.color }}>{r.label}</span>
-                        <span className="font-mono text-sm text-white/60">{r.wins} раундов · {totalRounds ? Math.round(r.wins / totalRounds * 100) : 0}%</span>
-                      </div>
-                      <ConfBar value={totalRounds ? r.wins / totalRounds : 0} color={r.color} />
-                    </div>
-                  ))}
-                </div>
-                {totalRounds > 0 && (
-                  <div className="mt-4 h-6 rounded-full overflow-hidden flex">
-                    <div style={{ width: `${alphaWins / totalRounds * 100}%`, background: "#22d3ee55" }} />
-                    <div style={{ flex: 1, background: "#c084fc55" }} />
-                  </div>
-                )}
-              </div>
-
-              {/* Мерцание по раундам */}
-              <div className="glass-card rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Icon name="Zap" size={14} className="text-yellow-400" />
-                  <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Анализ мерцания по раундам</span>
-                </div>
-                {history.length === 0 ? (
-                  <p className="font-mono text-xs text-white/25 text-center py-6">Нет данных</p>
-                ) : (
-                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                    {[...history].reverse().slice(0, 15).map(r => (
-                      <div key={r.id} className="flex items-center gap-2 text-xs font-mono">
-                        <span className="text-white/25 w-8">#{r.id}</span>
-                        <ReactorBadge reactor={r.winner} size="sm" />
-                        <div className="flex-1 h-4 rounded bg-white/5 overflow-hidden flex">
-                          <div style={{ width: `${r.flickerBias > 0 ? r.flickerBias * 100 : 0}%`, background: "#22d3ee55" }} />
-                          <div style={{ width: `${r.flickerBias < 0 ? Math.abs(r.flickerBias) * 100 : 0}%`, background: "#c084fc55" }} />
-                        </div>
-                        <span className="text-yellow-400 w-12 text-right">{r.flickerRate.toFixed(1)}/с</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Паттерны */}
-            <div className="glass-card rounded-xl p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Icon name="GitMerge" size={14} className="text-neon-green" />
-                <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Найденные паттерны последовательностей</span>
-              </div>
-              {patterns.length === 0 ? (
-                <p className="font-mono text-xs text-white/25 text-center py-6">Нужно больше раундов для поиска паттернов</p>
-              ) : (
-                <div className="grid sm:grid-cols-2 gap-3">
-                  {patterns.map((p, i) => (
-                    <div key={i} className="glass-card-purple rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="font-mono text-xs text-white/40">{p.label}</span>
-                        <span className="font-mono text-xs text-purple-400">{Math.round(p.confidence * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-                        {p.sequence.map((r, j) => (
-                          <div key={j} className="flex items-center gap-1">
-                            <span
-                              className="w-7 h-7 flex items-center justify-center rounded font-display text-sm border"
-                              style={{
-                                background: r === "alpha" ? "rgba(34,211,238,0.12)" : "rgba(192,132,252,0.12)",
-                                borderColor: r === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
-                                color: r === "alpha" ? "#22d3ee" : "#c084fc",
-                              }}
-                            >{r === "alpha" ? "α" : "ω"}</span>
-                            {j < p.sequence.length - 1 && <Icon name="ArrowRight" size={8} className="text-white/20" />}
-                          </div>
-                        ))}
-                        <Icon name="ArrowRight" size={10} className="text-neon-green/40" />
-                        <span
-                          className="w-7 h-7 flex items-center justify-center rounded font-display text-sm border font-bold"
-                          style={{
-                            background: p.next === "alpha" ? "rgba(34,211,238,0.2)" : "rgba(192,132,252,0.2)",
-                            borderColor: p.next === "alpha" ? "#22d3ee" : "#c084fc",
-                            color: p.next === "alpha" ? "#22d3ee" : "#c084fc",
-                          }}
-                        >{p.next === "alpha" ? "α" : "ω"}</span>
-                      </div>
-                      <ConfBar value={p.confidence} color={p.next === "alpha" ? "#22d3ee" : "#c084fc"} />
-                      <p className="font-mono text-xs text-white/20 mt-1.5">встречается {p.count}×</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Тепловая карта */}
-            {history.length > 0 && (
-              <div className="glass-card rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Icon name="Flame" size={14} className="text-orange-400" />
-                  <span className="font-display text-xs tracking-widest text-orange-400/80 uppercase">Хронология раундов</span>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {history.map((r, i) => (
-                    <div
-                      key={r.id}
-                      title={`#${r.id}: ${r.winner === "alpha" ? "Альфа" : "Омега"} · ${fmt(r.timestamp)}`}
-                      className="w-7 h-7 rounded-md flex items-center justify-center cursor-default transition-transform hover:scale-110 font-display text-xs"
-                      style={{
-                        background: r.winner === "alpha" ? `rgba(34,211,238,${0.2 + (i / history.length) * 0.5})` : `rgba(192,132,252,${0.2 + (i / history.length) * 0.5})`,
-                        border: `1px solid ${r.winner === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)"}`,
-                        color: r.winner === "alpha" ? "#22d3ee" : "#c084fc",
-                      }}
-                    >
-                      {r.winner === "alpha" ? "α" : "ω"}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
 
         {/* ── МОДЕЛЬ ML ── */}
         {tab === "model" && (

@@ -24,6 +24,8 @@ export interface RoundResult {
   flickerPattern: FlickerSample[];
   flickerRate: number;
   flickerBias: number;
+  predictedBefore: Reactor;
+  predictionHit: boolean | null;
 }
 
 // RGB-диапазон жёлтого
