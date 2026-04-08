@@ -5,7 +5,7 @@ import { predict, getTopPatterns } from "@/lib/mlPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
 
-type Tab = "capture" | "history" | "prediction" | "stats" | "model";
+type Tab = "capture" | "prediction" | "stats" | "model";
 
 function fmt(ts: number) {
   return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -264,7 +264,6 @@ export default function Index() {
 
   const TABS: { id: Tab; icon: string; label: string }[] = [
     { id: "capture", icon: "Monitor", label: "Захват" },
-    { id: "history", icon: "Clock", label: "История" },
     { id: "prediction", icon: "Zap", label: "Предсказание" },
     { id: "stats", icon: "BarChart2", label: "Статистика" },
     { id: "model", icon: "Cpu", label: "Модель ML" },
@@ -331,7 +330,11 @@ export default function Index() {
 
         {/* ── ЗАХВАТ ЭКРАНА ── */}
         {tab === "capture" && (
-          <div className="space-y-5 animate-fade-in-up">
+          <div className="animate-fade-in-up">
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-5 items-start">
+
+            {/* ── ЛЕВАЯ КОЛОНКА ── */}
+            <div className="space-y-5">
 
             {/* Шаги */}
             <div className="glass-card rounded-xl p-5">
@@ -474,7 +477,7 @@ export default function Index() {
               <div
                 ref={previewRef}
                 className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden"
-                style={{ minHeight: 240, cursor: selectionMode ? "crosshair" : "default" }}
+                style={{ height: 200, cursor: selectionMode ? "crosshair" : "default" }}
                 onMouseDown={e => {
                   if (!selectionMode) return;
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -702,75 +705,75 @@ export default function Index() {
               </div>
             )}
           </div>
-        )}
+          </div> {/* конец левой колонки */}
 
-        {/* ── ИСТОРИЯ ── */}
-        {tab === "history" && (
-          <div className="space-y-5 animate-fade-in-up">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {[
-                { label: "Раундов", value: totalRounds, color: "text-neon-green", icon: "List" },
-                { label: "Альфа побед", value: alphaWins, color: "text-cyan-400", icon: "Zap" },
-                { label: "Омега побед", value: omegaWins, color: "text-purple-400", icon: "Zap" },
-                { label: "% Альфа", value: totalRounds ? `${Math.round(alphaWins / totalRounds * 100)}%` : "—", color: "text-yellow-400", icon: "BarChart2" },
-              ].map(s => (
-                <div key={s.label} className="glass-card rounded-xl p-4 text-center">
-                  <Icon name={s.icon} size={16} className={`${s.color} mx-auto mb-2`} />
-                  <p className={`font-display text-2xl ${s.color}`}>{s.value}</p>
-                  <p className="text-white/40 text-xs mt-1">{s.label}</p>
-                </div>
-              ))}
+          {/* ── ПРАВАЯ КОЛОНКА: История событий ── */}
+          <div className="glass-card rounded-xl flex flex-col" style={{ maxHeight: "80vh" }}>
+            <div className="px-4 pt-4 pb-3 border-b border-white/5 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Icon name="Clock" size={13} className="text-neon-green" />
+                <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">История событий</span>
+              </div>
+              <div className="flex items-center gap-3 font-mono text-xs">
+                <span className="text-cyan-400">α {alphaWins}</span>
+                <span className="text-white/20">·</span>
+                <span className="text-purple-400">ω {omegaWins}</span>
+                <span className="text-white/20">·</span>
+                <span className="text-white/40">{totalRounds} всего</span>
+              </div>
             </div>
 
             {history.length === 0 ? (
-              <div className="glass-card rounded-xl p-10 text-center">
-                <Icon name="Clock" size={36} className="text-white/10 mx-auto mb-3" />
-                <p className="font-mono text-sm text-white/30">Раундов пока нет — запусти захват экрана</p>
+              <div className="flex-1 flex flex-col items-center justify-center py-10 gap-2">
+                <Icon name="Clock" size={28} className="text-white/10" />
+                <p className="font-mono text-xs text-white/25">Событий пока нет</p>
               </div>
             ) : (
-              <div className="glass-card rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Icon name="Clock" size={14} className="text-neon-green" />
-                  <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Таблица раундов</span>
+              <div className="overflow-y-auto flex-1 p-3 space-y-1.5">
+                {[...history].reverse().map((r, i) => (
+                  <div
+                    key={r.id}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono transition-all"
+                    style={{
+                      background: i === 0 ? (r.winner === "alpha" ? "rgba(34,211,238,0.08)" : "rgba(192,132,252,0.08)") : "rgba(255,255,255,0.02)",
+                      border: `1px solid ${i === 0 ? (r.winner === "alpha" ? "rgba(34,211,238,0.25)" : "rgba(192,132,252,0.25)") : "transparent"}`,
+                    }}
+                  >
+                    <span className="text-white/20 w-6 flex-shrink-0">#{r.id}</span>
+                    <span
+                      className="font-bold w-16 flex-shrink-0"
+                      style={{ color: r.winner === "alpha" ? "#22d3ee" : "#c084fc" }}
+                    >
+                      {r.winner === "alpha" ? "α Альфа" : "ω Омега"}
+                    </span>
+                    <span className="text-white/35 flex-1">{fmt(r.timestamp)}</span>
+                    {i === 0 && (
+                      <span className="text-neon-green animate-blink text-xs">▌</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {totalRounds > 0 && (
+              <div className="px-4 py-3 border-t border-white/5 flex-shrink-0">
+                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${(alphaWins / totalRounds) * 100}%`, background: "linear-gradient(90deg, #22d3ee, #c084fc)" }}
+                  />
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs font-mono">
-                    <thead>
-                      <tr className="border-b border-white/10">
-                        {["#", "ПОБЕДИТЕЛЬ", "ВРЕМЯ", "ТЕМП МЕЦ.", "СМЕЩЕНИЕ", "МЕЦ. ПОДСКАЗКА"].map(h => (
-                          <th key={h} className="text-left py-2 px-3 text-white/30 font-normal tracking-widest">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {[...history].reverse().map((r, i) => {
-                        const flickerHint = r.flickerBias > 0.1 ? "omega" : r.flickerBias < -0.1 ? "alpha" : null;
-                        return (
-                          <tr key={r.id} className={`border-b border-white/5 ${i === 0 ? "bg-neon-green/5" : "hover:bg-white/3"}`}>
-                            <td className="py-2.5 px-3 text-white/25">#{r.id}</td>
-                            <td className="py-2.5 px-3"><ReactorBadge reactor={r.winner} size="sm" /></td>
-                            <td className="py-2.5 px-3 text-white/50">{fmt(r.timestamp)}</td>
-                            <td className="py-2.5 px-3 text-yellow-400">{r.flickerRate.toFixed(1)}/с</td>
-                            <td className="py-2.5 px-3">
-                              <span className={r.flickerBias > 0 ? "text-cyan-400" : r.flickerBias < 0 ? "text-purple-400" : "text-white/30"}>
-                                {r.flickerBias > 0 ? `α +${(r.flickerBias * 100).toFixed(0)}%` : r.flickerBias < 0 ? `ω +${(Math.abs(r.flickerBias) * 100).toFixed(0)}%` : "нейтр."}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              {flickerHint ? (
-                                <ReactorBadge reactor={flickerHint as "alpha" | "omega"} size="sm" />
-                              ) : <span className="text-white/20">—</span>}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                <div className="flex justify-between mt-1">
+                  <span className="font-mono text-xs text-cyan-400/60">α {Math.round(alphaWins / totalRounds * 100)}%</span>
+                  <span className="font-mono text-xs text-purple-400/60">ω {Math.round(omegaWins / totalRounds * 100)}%</span>
                 </div>
               </div>
             )}
           </div>
+          </div>
         )}
+
+
 
         {/* ── ПРЕДСКАЗАНИЕ ── */}
         {tab === "prediction" && (
