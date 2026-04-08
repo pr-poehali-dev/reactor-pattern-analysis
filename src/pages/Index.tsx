@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
-import { analyzeFrame, computeFlickerStats } from "@/lib/screenAnalyzer";
+import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns } from "@/lib/mlPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
@@ -127,6 +127,9 @@ export default function Index() {
 
   // Шаг 3: начать анализ после выделения области
   const startAnalyzing = useCallback(() => {
+    resetAnalyzerState();
+    lastResultTsRef.current = 0;
+    flickerBufRef.current = [];
     setCapturing(true);
     setStep("analyzing");
     setSelectionMode(false);
@@ -193,19 +196,20 @@ export default function Index() {
       const now = frame.timestamp;
       const prevPhase = phaseRef.current;
 
-      // Детектируем мерцание
-      if (frame.phase === "flicker") {
-        phaseRef.current = "flicker";
-        setRoundPhase("flicker");
+      // Мерцание — собираем сэмплы за последние 6 сек
+      if (frame.phase === "flicker" || frame.phase === "result") {
+        if (phaseRef.current === "idle") {
+          phaseRef.current = "flicker";
+          setRoundPhase("flicker");
+        }
         const dominant = frame.alphaYellow >= frame.omegaYellow ? "alpha" : "omega";
         flickerBufRef.current.push({ timestamp: now, dominant });
-        // Оставляем только последние 6 секунд
         flickerBufRef.current = flickerBufRef.current.filter(s => now - s.timestamp < 6000);
         setFlickerSamples([...flickerBufRef.current]);
       }
 
-      // Детектируем результат (стабильный жёлтый > 0.5 сек после последнего результата)
-      if (frame.phase === "result" && frame.winner && now - lastResultTsRef.current > 15000) {
+      // Резкий скачок = победитель зафиксирован, кулдаун EVENT_COOLDOWN_MS
+      if (frame.phase === "result" && frame.winner && now - lastResultTsRef.current > EVENT_COOLDOWN_MS) {
         lastResultTsRef.current = now;
         phaseRef.current = "result";
         setRoundPhase("result");
@@ -231,21 +235,17 @@ export default function Index() {
         flickerBufRef.current = [];
         setFlickerSamples([]);
 
-        // Через 3 сек возвращаемся в idle
         setTimeout(() => {
           phaseRef.current = "idle";
           setRoundPhase("idle");
+          resetAnalyzerState();
         }, 3000);
       }
 
-      // Если фаза была flicker, а теперь idle — обновить предсказание с учётом мерцания
-      if (prevPhase === "flicker" && frame.phase === "idle" && flickerBufRef.current.length > 3) {
-        const flickerStats = computeFlickerStats(flickerBufRef.current);
-        setHistory(prev => {
-          const pred = predict(prev, flickerStats.bias, flickerStats.rate);
-          setPrediction(pred);
-          return prev;
-        });
+      // Сигнал пропал — возвращаемся в idle
+      if (frame.phase === "idle" && phaseRef.current === "flicker") {
+        phaseRef.current = "idle";
+        setRoundPhase("idle");
       }
 
       analyzeLoopRef.current = requestAnimationFrame(loop);
@@ -586,9 +586,19 @@ export default function Index() {
                     </div>
                     <ConfBar value={Math.min(lastFrame.alphaYellow * 10, 1)} color="#facc15" />
                   </div>
+                  <div className="mb-2">
+                    <div className="flex justify-between mb-1">
+                      <span className="font-mono text-xs text-white/40">Скачок (Δ)</span>
+                      <span className="font-mono text-xs" style={{ color: lastFrame.alphaDelta >= 0.015 ? "#00ffcc" : lastFrame.alphaDelta > 0 ? "#facc15" : "rgba(255,255,255,0.3)" }}>
+                        {lastFrame.alphaDelta >= 0 ? "+" : ""}{(lastFrame.alphaDelta * 100).toFixed(2)}%
+                        {lastFrame.alphaDelta >= 0.015 && " ⚡"}
+                      </span>
+                    </div>
+                    <ConfBar value={Math.min(Math.abs(lastFrame.alphaDelta) * 20, 1)} color={lastFrame.alphaDelta >= 0.015 ? "#00ffcc" : "#facc1555"} />
+                  </div>
                   {roundPhase === "result" && lastFrame.winner === "alpha" && (
                     <div className="mt-3 text-center py-2 rounded-lg bg-neon-green/10 border border-neon-green/30">
-                      <span className="font-display text-sm text-neon-green tracking-widest">✓ SUCCESS</span>
+                      <span className="font-display text-sm text-neon-green tracking-widest">✓ ЗАФИКСИРОВАНО</span>
                     </div>
                   )}
                 </div>
@@ -606,9 +616,19 @@ export default function Index() {
                     </div>
                     <ConfBar value={Math.min(lastFrame.omegaYellow * 10, 1)} color="#facc15" />
                   </div>
+                  <div className="mb-2">
+                    <div className="flex justify-between mb-1">
+                      <span className="font-mono text-xs text-white/40">Скачок (Δ)</span>
+                      <span className="font-mono text-xs" style={{ color: lastFrame.omegaDelta >= 0.015 ? "#c084fc" : lastFrame.omegaDelta > 0 ? "#facc15" : "rgba(255,255,255,0.3)" }}>
+                        {lastFrame.omegaDelta >= 0 ? "+" : ""}{(lastFrame.omegaDelta * 100).toFixed(2)}%
+                        {lastFrame.omegaDelta >= 0.015 && " ⚡"}
+                      </span>
+                    </div>
+                    <ConfBar value={Math.min(Math.abs(lastFrame.omegaDelta) * 20, 1)} color={lastFrame.omegaDelta >= 0.015 ? "#c084fc" : "#facc1555"} />
+                  </div>
                   {roundPhase === "result" && lastFrame.winner === "omega" && (
                     <div className="mt-3 text-center py-2 rounded-lg bg-purple-500/10 border border-purple-500/30">
-                      <span className="font-display text-sm text-purple-300 tracking-widest">✓ SUCCESS</span>
+                      <span className="font-display text-sm text-purple-300 tracking-widest">✓ ЗАФИКСИРОВАНО</span>
                     </div>
                   )}
                 </div>

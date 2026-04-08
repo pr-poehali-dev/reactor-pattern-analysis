@@ -4,15 +4,17 @@ export type Reactor = "alpha" | "omega" | null;
 
 export interface FrameAnalysis {
   timestamp: number;
-  alphaYellow: number;   // 0..1 — насыщенность жёлтого в левой половине
-  omegaYellow: number;   // 0..1 — насыщенность жёлтого в правой половине
-  winner: Reactor;       // если найден SUCCESS-контур
+  alphaYellow: number;   // 0..1 — доля жёлтых пикселей в левой половине
+  omegaYellow: number;   // 0..1 — доля жёлтых пикселей в правой половине
+  alphaDelta: number;    // скачок относительно предыдущего кадра
+  omegaDelta: number;
+  winner: Reactor;       // кто победил (резкий скачок)
   phase: "idle" | "flicker" | "result";
 }
 
 export interface FlickerSample {
   timestamp: number;
-  dominant: Reactor;     // какая сторона ярче жёлтым
+  dominant: Reactor;
 }
 
 export interface RoundResult {
@@ -20,18 +22,50 @@ export interface RoundResult {
   winner: Reactor;
   timestamp: number;
   flickerPattern: FlickerSample[];
-  flickerRate: number;   // переключений в секунду за 5 сек до результата
-  flickerBias: number;   // -1 (omega) .. +1 (alpha) — кто мерцал чаще
+  flickerRate: number;
+  flickerBias: number;
 }
 
-// Пороговые значения для жёлтого цвета (RGB)
-const YELLOW_R_MIN = 180;
-const YELLOW_G_MIN = 160;
-const YELLOW_B_MAX = 80;
+// RGB-диапазон жёлтого
+const YELLOW_R_MIN = 170;
+const YELLOW_G_MIN = 150;
+const YELLOW_B_MAX = 90;
 
-// Порог для "жёлтого насыщения" — доля жёлтых пикселей для срабатывания
-const FLICKER_THRESHOLD = 0.04;
-const SUCCESS_THRESHOLD = 0.08;
+// Минимальный абсолютный уровень жёлтого чтобы не реагировать на шум
+const MIN_YELLOW_LEVEL = 0.005;
+
+// Порог резкого скачка — насколько должен вырасти сигнал за 1 кадр
+const SPIKE_THRESHOLD = 0.015;
+
+// Минимальный уровень после скачка (защита от ложных срабатываний)
+const SPIKE_MIN_LEVEL = 0.02;
+
+// Кулдаун между записями событий (мс) — ~25 сек чтобы не задваивать
+const EVENT_COOLDOWN_MS = 25000;
+
+// Кулдаун для детекции мерцания
+const FLICKER_MIN_LEVEL = 0.008;
+
+function countYellowRatio(data: Uint8ClampedArray): number {
+  let yellow = 0;
+  const total = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    if (r >= YELLOW_R_MIN && g >= YELLOW_G_MIN && b <= YELLOW_B_MAX) {
+      yellow++;
+    }
+  }
+  return yellow / total;
+}
+
+// Состояние предыдущего кадра (хранится вне функции для отслеживания дельты)
+let prevAlpha = 0;
+let prevOmega = 0;
+
+export function resetAnalyzerState() {
+  prevAlpha = 0;
+  prevOmega = 0;
+}
 
 export function analyzeFrame(
   ctx: CanvasRenderingContext2D,
@@ -47,35 +81,33 @@ export function analyzeFrame(
   const alphaYellow = countYellowRatio(leftData);
   const omegaYellow = countYellowRatio(rightData);
 
+  // Дельта — насколько вырос сигнал с прошлого кадра
+  const alphaDelta = alphaYellow - prevAlpha;
+  const omegaDelta = omegaYellow - prevOmega;
+
+  prevAlpha = alphaYellow;
+  prevOmega = omegaYellow;
+
   let winner: Reactor = null;
   let phase: FrameAnalysis["phase"] = "idle";
 
-  const maxYellow = Math.max(alphaYellow, omegaYellow);
+  const maxLevel = Math.max(alphaYellow, omegaYellow);
 
-  if (maxYellow >= SUCCESS_THRESHOLD) {
-    // Финальный результат — устойчивый жёлтый
-    winner = alphaYellow > omegaYellow ? "alpha" : "omega";
+  // Резкий скачок = delta > SPIKE_THRESHOLD И уровень достаточный
+  const alphaSpike = alphaDelta >= SPIKE_THRESHOLD && alphaYellow >= SPIKE_MIN_LEVEL;
+  const omegaSpike = omegaDelta >= SPIKE_THRESHOLD && omegaYellow >= SPIKE_MIN_LEVEL;
+
+  if (alphaSpike || omegaSpike) {
     phase = "result";
-  } else if (maxYellow >= FLICKER_THRESHOLD) {
+    // Победил тот у кого больше абсолютный уровень после скачка
+    winner = alphaYellow >= omegaYellow ? "alpha" : "omega";
+  } else if (maxLevel >= FLICKER_MIN_LEVEL) {
     phase = "flicker";
   }
 
-  return { timestamp: now, alphaYellow, omegaYellow, winner, phase };
+  return { timestamp: now, alphaYellow, omegaYellow, alphaDelta, omegaDelta, winner, phase };
 }
 
-function countYellowRatio(data: Uint8ClampedArray): number {
-  let yellow = 0;
-  const total = data.length / 4;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    if (r >= YELLOW_R_MIN && g >= YELLOW_G_MIN && b <= YELLOW_B_MAX) {
-      yellow++;
-    }
-  }
-  return yellow / total;
-}
-
-// Вычисляет характеристики мерцания из набора сэмплов
 export function computeFlickerStats(samples: FlickerSample[]): {
   rate: number;
   bias: number;
@@ -99,7 +131,9 @@ export function computeFlickerStats(samples: FlickerSample[]): {
   const total = alphaCount + omegaCount;
   const alphaPct = total > 0 ? alphaCount / total : 0.5;
   const omegaPct = total > 0 ? omegaCount / total : 0.5;
-  const bias = alphaPct - omegaPct; // +1 = всё alpha, -1 = всё omega
+  const bias = alphaPct - omegaPct;
 
   return { rate, bias, alphaPct, omegaPct };
 }
+
+export { EVENT_COOLDOWN_MS };
