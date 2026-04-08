@@ -755,12 +755,13 @@ export default function Index() {
                 </div>
 
                 {/* Разбивка сигналов */}
-                <div className="border-t px-5 py-3 grid grid-cols-5 gap-2" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                <div className="border-t px-5 py-3 grid grid-cols-6 gap-2" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
                   {[
                     { label: "Паттерн", val: prediction.signals.patternScore, color: "#00ffcc" },
+                    { label: "Мерц.↔Пат", val: prediction.signals.flickerPatternScore, color: "#34d399" },
                     { label: "Мерцание", val: prediction.signals.flickerScore, color: "#facc15" },
                     { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
-                    { label: "Серия", val: prediction.signals.streakScore, color: "#a855f7" },
+                    { label: "Серия 6+", val: prediction.signals.streakScore, color: "#a855f7" },
                     { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
                   ].map(s => (
                     <div key={s.label} className="text-center">

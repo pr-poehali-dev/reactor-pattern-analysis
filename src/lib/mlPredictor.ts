@@ -1,10 +1,11 @@
 /**
- * ML-предсказатель с многоуровневым анализом:
+ * ML-предсказатель v3:
  * 1. Паттерны длиной 5 (приоритет) → 4 → 3 → 2
- * 2. Учёт стремления к балансу 50/50 (регуляризация)
- * 3. Мерцание: темп и скорость переключения α↔ω влияют на вес
- * 4. Адаптация к изменениям: скользящее окно + затухание старых данных
- * 5. Детектор скрытых закономерностей: авторегрессия + дисбаланс серий
+ * 2. Баланс 50/50 (регуляризация)
+ * 3. Детектор серий 6+ (длинные серии без верхнего предела)
+ * 4. Взаимосвязь паттерн↔мерцание: система обучается какой темп/смещение
+ *    мерцания предшествует каждому паттерну, и использует это как доп. сигнал
+ * 5. Адаптация: скользящее окно + EMA-затухание + коррекция по точности
  */
 import type { Reactor, RoundResult } from "./screenAnalyzer";
 
@@ -14,7 +15,15 @@ export interface Pattern {
   count: number;
   confidence: number;
   label: string;
-  weight: number; // итоговый вес с учётом давности
+  weight: number;
+  // Характеристики мерцания, типично предшествующего этому паттерну
+  flickerProfile: FlickerProfile | null;
+}
+
+export interface FlickerProfile {
+  avgRate: number;       // средний темп переключений перед этим паттерном
+  avgBias: number;       // среднее смещение (>0 = α чаще, <0 = ω чаще)
+  sampleCount: number;
 }
 
 export interface Prediction {
@@ -30,6 +39,7 @@ export interface Prediction {
 export interface SignalBreakdown {
   patternScore: number;
   flickerScore: number;
+  flickerPatternScore: number; // бонус за совпадение мерцания с профилем паттерна
   balanceScore: number;
   streakScore: number;
   adaptScore: number;
@@ -37,45 +47,71 @@ export interface SignalBreakdown {
 
 // ── Настройки ────────────────────────────────────────────
 
-// Приоритет длин паттернов (5 — главный)
 const SEQ_LENGTHS = [5, 4, 3, 2];
-
-// Минимум вхождений паттерна чтобы доверять ему
 const MIN_PATTERN_COUNT = 2;
-
-// Затухание старых данных — сколько последних раундов учитывать в полную силу
 const RECENCY_WINDOW = 20;
-
-// Коэффициент регуляризации к балансу 50/50
 const BALANCE_PULL = 0.15;
-
-// Порог для детекции серии (стрика)
-const STREAK_THRESHOLD = 3;
+const STREAK_THRESHOLD = 6;   // серии 6+ считаем значимыми
 
 // ── Утилиты ──────────────────────────────────────────────
 
 function reactorLabel(r: Reactor): string {
   return r === "alpha" ? "A" : r === "omega" ? "O" : "?";
 }
-
 function seqLabel(seq: Reactor[]): string {
   return seq.map(reactorLabel).join("");
 }
-
-// Экспоненциальный вес по давности (новые важнее)
 function recencyWeight(index: number, total: number): number {
-  const age = total - 1 - index; // 0 = самый новый
+  const age = total - 1 - index;
   return Math.exp(-age / RECENCY_WINDOW);
+}
+
+// ── Построение профилей мерцания для каждого паттерна ────
+// Для каждого вхождения паттерна в историю — смотрим мерцание перед ним
+
+function buildFlickerProfiles(history: RoundResult[]): Map<string, FlickerProfile> {
+  const profiles: Map<string, { rates: number[]; biases: number[] }> = new Map();
+
+  for (const len of SEQ_LENGTHS) {
+    for (let i = 0; i <= history.length - len - 1; i++) {
+      const seq = history.slice(i, i + len);
+      const nextR = history[i + len];
+      if (seq.some(r => r.winner === null) || nextR.winner === null) continue;
+
+      // Ключ: паттерн + следующий
+      const seqKey = seq.map(r => r.winner).join(",") + "→" + nextR.winner;
+
+      // Мерцание непосредственно перед этим вхождением (последний раунд в seq)
+      const lastInSeq = seq[seq.length - 1];
+      const rate = lastInSeq.flickerRate;
+      const bias = lastInSeq.flickerBias;
+
+      if (!profiles.has(seqKey)) profiles.set(seqKey, { rates: [], biases: [] });
+      const p = profiles.get(seqKey)!;
+      p.rates.push(rate);
+      p.biases.push(bias);
+    }
+  }
+
+  const result: Map<string, FlickerProfile> = new Map();
+  profiles.forEach((data, key) => {
+    const n = data.rates.length;
+    if (n < 2) return;
+    result.set(key, {
+      avgRate: data.rates.reduce((a, b) => a + b, 0) / n,
+      avgBias: data.biases.reduce((a, b) => a + b, 0) / n,
+      sampleCount: n,
+    });
+  });
+  return result;
 }
 
 // ── Поиск паттернов с весами давности ───────────────────
 
 export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): Pattern[] {
   const map: Map<string, {
-    alphaCount: number;
-    omegaCount: number;
-    totalWeight: number;
-    alphaWeight: number;
+    alphaCount: number; omegaCount: number;
+    totalWeight: number; alphaWeight: number;
   }> = new Map();
 
   const total = history.length;
@@ -90,24 +126,19 @@ export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): 
       if (!map.has(key)) map.set(key, { alphaCount: 0, omegaCount: 0, totalWeight: 0, alphaWeight: 0 });
       const entry = map.get(key)!;
       const w = recencyWeight(i + len, total);
-
       entry.totalWeight += w;
       if (next === "alpha") { entry.alphaCount++; entry.alphaWeight += w; }
-      else { entry.omegaCount++; }
+      else entry.omegaCount++;
     }
   }
 
   const result: Pattern[] = [];
-
   map.forEach((data, key) => {
     const count = data.alphaCount + data.omegaCount;
     if (count < minCount) return;
-
-    // Взвешенная вероятность (новые раунды важнее)
-    const alphaWeightedPct = data.totalWeight > 0 ? data.alphaWeight / data.totalWeight : 0.5;
-    const bestNext: Reactor = alphaWeightedPct >= 0.5 ? "alpha" : "omega";
-    const confidence = bestNext === "alpha" ? alphaWeightedPct : 1 - alphaWeightedPct;
-
+    const alphaW = data.totalWeight > 0 ? data.alphaWeight / data.totalWeight : 0.5;
+    const bestNext: Reactor = alphaW >= 0.5 ? "alpha" : "omega";
+    const confidence = bestNext === "alpha" ? alphaW : 1 - alphaW;
     result.push({
       sequence: key.split(",") as Reactor[],
       next: bestNext,
@@ -115,10 +146,10 @@ export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): 
       confidence,
       label: seqLabel(key.split(",") as Reactor[]),
       weight: data.totalWeight,
+      flickerProfile: null, // заполняется в predict
     });
   });
 
-  // Сортируем: длина 5 с высокой уверенностью — вверх
   return result.sort((a, b) => {
     const lenDiff = b.sequence.length - a.sequence.length;
     if (lenDiff !== 0) return lenDiff;
@@ -126,61 +157,84 @@ export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): 
   });
 }
 
-// ── Детектор серий (стриков) ─────────────────────────────
+// ── Детектор серий (без верхнего предела) ───────────────
 
 function detectStreak(history: Reactor[]): { side: Reactor; length: number } {
-  if (history.length === 0) return { side: null, length: 0 };
-  const last = history[history.length - 1];
+  const valid = history.filter(r => r !== null);
+  if (valid.length === 0) return { side: null, length: 0 };
+  const last = valid[valid.length - 1];
   let len = 1;
-  for (let i = history.length - 2; i >= 0; i--) {
-    if (history[i] === last) len++;
+  for (let i = valid.length - 2; i >= 0; i--) {
+    if (valid[i] === last) len++;
     else break;
   }
   return { side: last, length: len };
 }
 
-// ── Адаптивный анализ мерцания ───────────────────────────
+// ── Базовый сигнал мерцания ──────────────────────────────
 
-function flickerSignal(
+function flickerBaseSignal(
   flickerBias: number,
   flickerRate: number,
   history: RoundResult[]
 ): { hint: Reactor; weight: number; reason: string } {
-  // Без данных
   if (Math.abs(flickerBias) < 0.05 || flickerRate < 0.3) {
     return { hint: null, weight: 0, reason: "" };
   }
 
-  // Базовое направление: кто мерцал меньше — тот победит
   const baseHint: Reactor = flickerBias > 0 ? "omega" : "alpha";
-
-  // Вес зависит от темпа переключений — чем быстрее, тем значимее
-  // Медленное мерцание (<1/с) — слабый сигнал
-  // Быстрое (>3/с) — сильный сигнал
   const rateWeight = Math.min(flickerRate / 4, 1.0);
   const biasWeight = Math.min(Math.abs(flickerBias) * 1.5, 1.0);
   const weight = rateWeight * biasWeight * 0.45;
 
-  // Проверяем историческую точность мерцания как предиктора
   const withFlicker = history.filter(r => r.flickerBias !== 0 && r.flickerRate > 0.3);
   if (withFlicker.length >= 3) {
-    const flickerCorrect = withFlicker.filter(r => {
-      const flickerPred: Reactor = r.flickerBias > 0 ? "omega" : "alpha";
-      return flickerPred === r.winner;
+    const hits = withFlicker.filter(r => {
+      const fp: Reactor = r.flickerBias > 0 ? "omega" : "alpha";
+      return fp === r.winner;
     }).length;
-    const flickerAcc = flickerCorrect / withFlicker.length;
-    // Если мерцание исторически врёт — снижаем вес
-    const accMultiplier = 0.3 + flickerAcc * 1.4; // 0.3..1.7
-    const adjustedWeight = Math.min(weight * accMultiplier, 0.5);
-    const reason = `мерцание ${(flickerRate).toFixed(1)}/с (точность ${Math.round(flickerAcc * 100)}%)`;
-    return { hint: baseHint, weight: adjustedWeight, reason };
+    const acc = hits / withFlicker.length;
+    const multiplier = 0.3 + acc * 1.4;
+    const adj = Math.min(weight * multiplier, 0.5);
+    return { hint: baseHint, weight: adj, reason: `мерц. ${flickerRate.toFixed(1)}/с (точн. ${Math.round(acc * 100)}%)` };
   }
 
-  const reason = `мерцание ${(flickerRate).toFixed(1)}/с`;
-  return { hint: baseHint, weight, reason };
+  return { hint: baseHint, weight, reason: `мерц. ${flickerRate.toFixed(1)}/с` };
 }
 
-// ── Основное предсказание ─────────────────────────────────
+// ── Сигнал взаимосвязи паттерн↔мерцание ─────────────────
+// Если текущее мерцание похоже на профиль паттерна → усиливаем или ослабляем
+
+function flickerPatternBonus(
+  pattern: Pattern,
+  flickerBias: number,
+  flickerRate: number,
+  flickerProfiles: Map<string, FlickerProfile>
+): { bonus: number; reason: string } {
+  const key = pattern.sequence.map(r => r).join(",") + "→" + pattern.next;
+  const profile = flickerProfiles.get(key);
+  if (!profile || profile.sampleCount < 2) return { bonus: 0, reason: "" };
+
+  // Насколько текущее мерцание похоже на исторический профиль этого паттерна
+  const rateDiff = Math.abs(flickerRate - profile.avgRate);
+  const biasDiff = Math.abs(flickerBias - profile.avgBias);
+
+  // Сходство: 0 (полное несоответствие) → 1 (идеальное совпадение)
+  const rateSim = Math.max(0, 1 - rateDiff / 3);
+  const biasSim = Math.max(0, 1 - biasDiff / 0.5);
+  const similarity = (rateSim + biasSim) / 2;
+
+  // Если похоже — бонус к паттерну, если нет — штраф
+  const bonus = (similarity - 0.5) * 0.2;
+  const direction = bonus > 0 ? "↑ совпадение мерцания" : "↓ мерцание не типично";
+  const reason = profile.sampleCount >= 3
+    ? `${direction} (n=${profile.sampleCount}, sim=${Math.round(similarity * 100)}%)`
+    : "";
+
+  return { bonus, reason };
+}
+
+// ── Основное предсказание ────────────────────────────────
 
 export function predict(
   history: RoundResult[],
@@ -195,14 +249,21 @@ export function predict(
       reactor: null, confidence: 0,
       reason: "Недостаточно данных (нужно 2+ раунда)",
       patternMatch: null, flickerHint: null, flickerWeight: 0,
-      signals: { patternScore: 0, flickerScore: 0, balanceScore: 0, streakScore: 0, adaptScore: 0 },
+      signals: { patternScore: 0, flickerScore: 0, flickerPatternScore: 0, balanceScore: 0, streakScore: 0, adaptScore: 0 },
     };
   }
 
-  // ── 1. Паттерны (приоритет длина 5) ──────────────────
   const patterns = findPatterns(reactorHistory);
-  let bestPattern: Pattern | null = null;
+  const flickerProfiles = buildFlickerProfiles(history);
 
+  // Прикрепляем профили мерцания к паттернам
+  patterns.forEach(p => {
+    const key = p.sequence.join(",") + "→" + p.next;
+    p.flickerProfile = flickerProfiles.get(key) ?? null;
+  });
+
+  // ── 1. Лучший паттерн ────────────────────────────────
+  let bestPattern: Pattern | null = null;
   for (const len of SEQ_LENGTHS) {
     const tail = reactorHistory.slice(-len);
     if (tail.includes(null)) continue;
@@ -213,103 +274,89 @@ export function predict(
 
   let alphaScore = 0;
   let omegaScore = 0;
-  const signals: SignalBreakdown = { patternScore: 0, flickerScore: 0, balanceScore: 0, streakScore: 0, adaptScore: 0 };
+  const signals: SignalBreakdown = {
+    patternScore: 0, flickerScore: 0, flickerPatternScore: 0,
+    balanceScore: 0, streakScore: 0, adaptScore: 0,
+  };
+  const reasonParts: string[] = [];
 
-  // Вес паттерна зависит от длины: 5→0.5, 4→0.42, 3→0.34, 2→0.26
+  // Вес паттерна по длине: 5→0.50, 4→0.42, 3→0.34, 2→0.26
   if (bestPattern) {
-    const lenWeight = 0.18 + bestPattern.sequence.length * 0.064;
-    const patW = bestPattern.confidence * lenWeight;
+    const lenW = 0.18 + bestPattern.sequence.length * 0.064;
+    const patW = bestPattern.confidence * lenW;
     if (bestPattern.next === "alpha") alphaScore += patW;
     else omegaScore += patW;
     signals.patternScore = patW;
+    reasonParts.push(`паттерн ${bestPattern.label} len=${bestPattern.sequence.length} (${Math.round(bestPattern.confidence * 100)}%)`);
+
+    // Бонус взаимосвязи паттерн↔мерцание
+    const { bonus, reason: bonusReason } = flickerPatternBonus(bestPattern, flickerBias, flickerRate, flickerProfiles);
+    if (bonus !== 0) {
+      if (bestPattern.next === "alpha") alphaScore += bonus;
+      else omegaScore += bonus;
+      signals.flickerPatternScore = Math.abs(bonus);
+      if (bonusReason) reasonParts.push(bonusReason);
+    }
   }
 
-  // ── 2. Баланс 50/50 (регуляризация) ──────────────────
-  // Если альфа выпала слишком часто → тянем к омеге и наоборот
+  // ── 2. Баланс 50/50 ──────────────────────────────────
   const alphaTotal = validHistory.filter(r => r === "alpha").length;
-  const omegaTotal = validHistory.length - alphaTotal;
   const alphaPct = validHistory.length > 0 ? alphaTotal / validHistory.length : 0.5;
-  // Чем сильнее дисбаланс — тем сильнее тянем к отстающей стороне
   const balancePull = (0.5 - alphaPct) * BALANCE_PULL;
   alphaScore += balancePull;
   omegaScore -= balancePull;
   signals.balanceScore = Math.abs(balancePull);
-
-  // ── 3. Детектор серий ─────────────────────────────────
-  const streak = detectStreak(reactorHistory.filter(r => r !== null));
-  if (streak.length >= STREAK_THRESHOLD) {
-    // Длинная серия → ожидаем смену
-    const streakWeight = Math.min((streak.length - STREAK_THRESHOLD + 1) * 0.06, 0.25);
-    if (streak.side === "alpha") omegaScore += streakWeight;
-    else alphaScore += streakWeight;
-    signals.streakScore = streakWeight;
+  if (Math.abs(alphaPct - 0.5) > 0.1) {
+    reasonParts.push(`баланс ${alphaPct > 0.5 ? "α" : "ω"} +${Math.round(Math.abs(alphaPct - 0.5) * 200)}%`);
   }
 
-  // ── 4. Мерцание ───────────────────────────────────────
-  const flicker = flickerSignal(flickerBias, flickerRate, history);
+  // ── 3. Серии 6+ (без ограничения сверху) ─────────────
+  const streak = detectStreak(reactorHistory);
+  if (streak.length >= STREAK_THRESHOLD) {
+    // Чем длиннее серия — тем сильнее ожидаем смену, но с насыщением
+    // 6→0.12, 8→0.18, 10→0.22, 15→0.28, 20→0.32
+    const streakW = Math.min(0.12 + Math.log(streak.length - STREAK_THRESHOLD + 1) * 0.08, 0.35);
+    if (streak.side === "alpha") omegaScore += streakW;
+    else alphaScore += streakW;
+    signals.streakScore = streakW;
+    reasonParts.push(`серия ${streak.length}×${reactorLabel(streak.side)} → смена`);
+  }
+
+  // ── 4. Мерцание ──────────────────────────────────────
+  const flicker = flickerBaseSignal(flickerBias, flickerRate, history);
   if (flicker.hint) {
     if (flicker.hint === "alpha") alphaScore += flicker.weight;
     else omegaScore += flicker.weight;
     signals.flickerScore = flicker.weight;
+    reasonParts.push(flicker.reason);
   }
 
-  // ── 5. Адаптивный скользящий анализ (последние 10) ───
-  // Смотрим точность предыдущих прогнозов и корректируем
+  // ── 5. Адаптивная коррекция (последние 10) ───────────
   const recent = history.slice(-10);
-  const recentHits = recent.filter(r => r.predictionHit === true).length;
-  const recentTotal = recent.filter(r => r.predictionHit !== null).length;
-  if (recentTotal >= 3) {
-    const recentAcc = recentHits / recentTotal;
-    // Если точность низкая — усиливаем сигнал противоположной стороны
-    if (recentAcc < 0.4) {
-      const adaptW = (0.4 - recentAcc) * 0.3;
+  const recentWithPred = recent.filter(r => r.predictionHit !== null);
+  const recentHits = recentWithPred.filter(r => r.predictionHit).length;
+  if (recentWithPred.length >= 3) {
+    const acc = recentHits / recentWithPred.length;
+    if (acc < 0.4) {
+      const adaptW = (0.4 - acc) * 0.3;
       if (alphaScore > omegaScore) omegaScore += adaptW;
       else alphaScore += adaptW;
       signals.adaptScore = adaptW;
+      reasonParts.push(`адапт. (точн. ${Math.round(acc * 100)}%)`);
     }
   }
 
-  // ── Финальный результат ───────────────────────────────
-  // Нормализуем — если оба 0, идём к балансу
-  if (alphaScore === 0 && omegaScore === 0) {
-    alphaScore = 0.5;
-    omegaScore = 0.5;
-  }
-
+  // ── Финал ────────────────────────────────────────────
+  if (alphaScore === 0 && omegaScore === 0) { alphaScore = 0.5; omegaScore = 0.5; }
   const total = alphaScore + omegaScore;
   const alphaNorm = alphaScore / total;
   const reactor: Reactor = alphaNorm >= 0.5 ? "alpha" : "omega";
   const rawConf = Math.max(alphaNorm, 1 - alphaNorm);
-  // Уверенность: от 0.5 до 0.92
   const confidence = Math.min(0.92, 0.5 + (rawConf - 0.5) * 1.6);
 
-  // ── Формируем объяснение ──────────────────────────────
-  const parts: string[] = [];
-
-  if (bestPattern) {
-    parts.push(`паттерн ${bestPattern.label} (${Math.round(bestPattern.confidence * 100)}%, len=${bestPattern.sequence.length})`);
-  }
-  if (streak.length >= STREAK_THRESHOLD) {
-    parts.push(`серия ${streak.length}×${reactorLabel(streak.side)} → жду смену`);
-  }
-  if (flicker.hint) {
-    parts.push(flicker.reason);
-  }
-  if (Math.abs(alphaPct - 0.5) > 0.1) {
-    const side = alphaPct > 0.5 ? "α перевес" : "ω перевес";
-    parts.push(`баланс: ${side} ${Math.round(Math.abs(alphaPct - 0.5) * 200)}%`);
-  }
-  if (signals.adaptScore > 0) {
-    parts.push(`адапт. корр. (точн. ${Math.round(recentHits / recentTotal * 100)}%)`);
-  }
-  if (parts.length === 0) parts.push("базовая статистика");
-
-  const reason = parts.join(" · ");
-
   return {
-    reactor,
-    confidence,
-    reason,
+    reactor, confidence,
+    reason: reasonParts.length > 0 ? reasonParts.join(" · ") : "базовая статистика",
     patternMatch: bestPattern,
     flickerHint: flicker.hint,
     flickerWeight: flicker.weight,
@@ -317,7 +364,7 @@ export function predict(
   };
 }
 
-// ── Топ паттернов для отображения ────────────────────────
+// ── Топ паттернов ────────────────────────────────────────
 export function getTopPatterns(history: RoundResult[]): Pattern[] {
   return findPatterns(history.map(r => r.winner), MIN_PATTERN_COUNT).slice(0, 8);
 }
