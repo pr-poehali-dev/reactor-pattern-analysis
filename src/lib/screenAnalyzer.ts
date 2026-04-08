@@ -37,26 +37,26 @@ export interface RoundResult {
 
 // ── Пороги ──────────────────────────────────────────────
 
-// RGB-диапазон жёлтого (широкий для чувствительности)
-const YELLOW_R_MIN = 150;
-const YELLOW_G_MIN = 130;
-const YELLOW_B_MAX = 100;
+// RGB-диапазон жёлтого — максимально широкий
+const YELLOW_R_MIN = 140;
+const YELLOW_G_MIN = 120;
+const YELLOW_B_MAX = 110;
 
-// Минимальный уровень сигнала чтобы считать что жёлтое есть
-const FLICKER_MIN_LEVEL = 0.003;
+// Минимальный уровень сигнала для детекции мерцания (очень низкий)
+const FLICKER_MIN_LEVEL = 0.0008;
 
-// Порог разницы между колонками чтобы определить доминирующую
-const DOMINANCE_DIFF = 0.001;
+// Порог разницы между колонками для определения доминирующей
+const DOMINANCE_DIFF = 0.0003;
 
 // Порог резкого скачка за 1 кадр → запись победителя
-const SPIKE_THRESHOLD = 0.012;
-const SPIKE_MIN_LEVEL = 0.015;
+const SPIKE_THRESHOLD = 0.008;
+const SPIKE_MIN_LEVEL = 0.008;
 
 // Кулдаун между записями событий
 export const EVENT_COOLDOWN_MS = 25000;
 
-// EMA коэффициент сглаживания (0..1, больше = быстрее реагирует)
-const EMA_ALPHA = 0.4;
+// EMA — быстрее реагирует на смену
+const EMA_ALPHA = 0.55;
 
 // ── Состояние между кадрами ─────────────────────────────
 let prevAlpha = 0;
