@@ -99,24 +99,29 @@ export default function Index() {
   // Шаг 1: запустить стрим и показать превью
   const startPreview = useCallback(async () => {
     setCaptureError(null);
+    setCaptureError("[1] Проверяю API...");
 
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      setCaptureError(`getDisplayMedia недоступен.\nisSecureContext: ${window.isSecureContext}\nprotocol: ${location.protocol}`);
+      setCaptureError(`[СТОП] getDisplayMedia недоступен\nisSecureContext: ${window.isSecureContext}\nprotocol: ${location.protocol}`);
       return;
     }
 
+    setCaptureError("[2] Вызываю getDisplayMedia...");
+
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const tracks = stream.getVideoTracks();
+      setCaptureError(`[3] Стрим получен ✓\nТреки: ${tracks.map(t => t.label || t.kind).join(", ")}\nvideoRef сейчас: ${videoRef.current ? "есть" : "null — жду рендера"}`);
+
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
       stream.getVideoTracks()[0].addEventListener("ended", stopCapture);
+
+      // Сначала рендерим video-элемент (step=preview), потом в useEffect присвоим srcObject
       setStep("preview");
-      setSelectionMode(true); // сразу включаем режим выделения
+      setSelectionMode(true);
     } catch (e: unknown) {
       const err = e as Error;
-      setCaptureError(`Ошибка: ${err.name} — ${err.message}`);
+      setCaptureError(`[ОШИБКА] ${err.name}: ${err.message}`);
     }
   }, [stopCapture]);
 
@@ -126,6 +131,23 @@ export default function Index() {
     setStep("analyzing");
     setSelectionMode(false);
   }, []);
+
+  // Присваиваем srcObject после рендера video-элемента
+  useEffect(() => {
+    if (step === "preview" && videoRef.current && streamRef.current) {
+      const video = videoRef.current;
+      video.srcObject = streamRef.current;
+      setCaptureError(prev => (prev ?? "") + `\n[4] srcObject присвоен ✓\nvideo.readyState: ${video.readyState}`);
+      video.onloadedmetadata = () => {
+        setCaptureError(prev => (prev ?? "") + `\n[5] metadata загружена ✓ — ${video.videoWidth}×${video.videoHeight}`);
+        video.play().then(() => {
+          setCaptureError(prev => (prev ?? "") + "\n[6] play() ✓ — превью должно отображаться");
+        }).catch(e => {
+          setCaptureError(prev => (prev ?? "") + `\n[6] play() ОШИБКА: ${e.message}`);
+        });
+      };
+    }
+  }, [step]);
 
   // Основной цикл анализа кадров
   useEffect(() => {
@@ -405,7 +427,8 @@ export default function Index() {
               </div>
 
               {captureError && (
-                <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                <div className="mt-4 px-4 py-3 rounded-lg bg-white/5 border border-white/10 font-mono text-xs leading-relaxed whitespace-pre-wrap"
+                  style={{ color: captureError.includes("ОШИБКА") || captureError.includes("СТОП") ? "#f87171" : "#a3e635" }}>
                   {captureError}
                 </div>
               )}
