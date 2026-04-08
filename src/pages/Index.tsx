@@ -760,18 +760,46 @@ export default function Index() {
 
           {/* ── ПРАВАЯ КОЛОНКА: История событий ── */}
           <div className="glass-card rounded-xl flex flex-col sticky top-28" style={{ height: "calc(100vh - 180px)", minHeight: 500 }}>
-            <div className="px-4 pt-4 pb-3 border-b border-white/5 flex items-center justify-between flex-shrink-0">
-              <div className="flex items-center gap-2">
-                <Icon name="Clock" size={13} className="text-neon-green" />
-                <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">История событий</span>
+            <div className="px-4 pt-4 pb-3 border-b border-white/5 flex-shrink-0">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Icon name="Clock" size={13} className="text-neon-green" />
+                  <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">История событий</span>
+                </div>
+                <div className="flex items-center gap-2 font-mono text-xs">
+                  <span className="text-cyan-400">α {alphaWins}</span>
+                  <span className="text-white/20">·</span>
+                  <span className="text-purple-400">ω {omegaWins}</span>
+                  <span className="text-white/20">·</span>
+                  <span className="text-white/40">{totalRounds} всего</span>
+                </div>
               </div>
-              <div className="flex items-center gap-3 font-mono text-xs">
-                <span className="text-cyan-400">α {alphaWins}</span>
-                <span className="text-white/20">·</span>
-                <span className="text-purple-400">ω {omegaWins}</span>
-                <span className="text-white/20">·</span>
-                <span className="text-white/40">{totalRounds} всего</span>
-              </div>
+              {/* Точность прогноза */}
+              {(() => {
+                const withPred = history.filter(r => r.predictionHit !== null);
+                const hits = withPred.filter(r => r.predictionHit).length;
+                const acc = withPred.length > 0 ? hits / withPred.length : null;
+                return withPred.length > 0 ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs text-white/30">Точность прогноза</span>
+                      <span className="font-mono text-xs font-bold" style={{ color: acc! >= 0.6 ? "#00ffcc" : acc! >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                        {hits}/{withPred.length} — {Math.round(acc! * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${acc! * 100}%`,
+                          background: acc! >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : acc! >= 0.4 ? "#facc15" : "#f43f5e",
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="font-mono text-xs text-white/20">Точность появится после 2+ раундов</div>
+                );
+              })()}
             </div>
 
             {history.length === 0 ? (
