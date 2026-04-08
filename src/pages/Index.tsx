@@ -730,28 +730,47 @@ export default function Index() {
               </div>
             )}
 
-            {/* Быстрое предсказание на главном экране */}
+            {/* Предсказание */}
             {prediction && prediction.reactor && (
-              <div
-                className="rounded-xl p-5 border"
+              <div className="rounded-xl border overflow-hidden"
                 style={{
-                  background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.06)" : "rgba(192,132,252,0.06)",
+                  background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.05)" : "rgba(192,132,252,0.05)",
                   borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
-                  boxShadow: prediction.reactor === "alpha" ? "0 0 30px rgba(34,211,238,0.1)" : "0 0 30px rgba(192,132,252,0.1)",
+                  boxShadow: prediction.reactor === "alpha" ? "0 0 24px rgba(34,211,238,0.08)" : "0 0 24px rgba(192,132,252,0.08)",
                 }}
               >
-                <div className="flex items-center justify-between flex-wrap gap-3">
+                {/* Основной результат */}
+                <div className="flex items-center justify-between px-5 py-4">
                   <div>
                     <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-2">Следующий победитель</p>
                     <ReactorBadge reactor={prediction.reactor} size="lg" />
-                    <p className="font-mono text-xs text-white/40 mt-2">{prediction.reason}</p>
+                    <p className="font-mono text-xs text-white/35 mt-2 leading-relaxed max-w-xs">{prediction.reason}</p>
                   </div>
-                  <div className="text-center">
-                    <p className="font-display text-4xl" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc", textShadow: `0 0 20px currentColor` }}>
+                  <div className="text-center flex-shrink-0">
+                    <p className="font-display text-5xl" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc", textShadow: `0 0 24px currentColor` }}>
                       {Math.round(prediction.confidence * 100)}%
                     </p>
                     <p className="font-mono text-xs text-white/30 mt-1">уверенность</p>
                   </div>
+                </div>
+
+                {/* Разбивка сигналов */}
+                <div className="border-t px-5 py-3 grid grid-cols-5 gap-2" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                  {[
+                    { label: "Паттерн", val: prediction.signals.patternScore, color: "#00ffcc" },
+                    { label: "Мерцание", val: prediction.signals.flickerScore, color: "#facc15" },
+                    { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
+                    { label: "Серия", val: prediction.signals.streakScore, color: "#a855f7" },
+                    { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
+                  ].map(s => (
+                    <div key={s.label} className="text-center">
+                      <div className="h-1 rounded-full bg-white/5 mb-1 overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${Math.min(s.val / 0.5 * 100, 100)}%`, background: s.color }} />
+                      </div>
+                      <p className="font-mono text-white/25" style={{ fontSize: 9 }}>{s.label}</p>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
