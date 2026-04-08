@@ -660,7 +660,7 @@ export default function Index() {
             )}
 
             {/* Мерцание в реальном времени */}
-            {roundPhase === "flicker" && flickerSamples.length > 0 && (
+            {capturing && (
               <div className="glass-card rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
