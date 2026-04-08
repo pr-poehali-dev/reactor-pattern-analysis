@@ -37,6 +37,8 @@ function ConfBar({ value, color = "#00ffcc" }: { value: number; color?: string }
 
 export default function Index() {
   const [tab, setTab] = useState<Tab>("capture");
+  // step: "idle" → "preview" (стрим есть, выделяем) → "analyzing" (анализ идёт)
+  const [step, setStep] = useState<"idle" | "preview" | "analyzing">("idle");
   const [capturing, setCapturing] = useState(false);
   const [history, setHistory] = useState<RoundResult[]>([]);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
@@ -86,57 +88,44 @@ export default function Index() {
     streamRef.current = null;
     if (analyzeLoopRef.current) cancelAnimationFrame(analyzeLoopRef.current);
     setCapturing(false);
+    setStep("idle");
+    setCropRect(null);
+    setSelectionMode(false);
     phaseRef.current = "idle";
     setRoundPhase("idle");
     flickerBufRef.current = [];
   }, []);
 
-  const startCapture = useCallback(async () => {
+  // Шаг 1: запустить стрим и показать превью
+  const startPreview = useCallback(async () => {
     setCaptureError(null);
-    const logs: string[] = [];
 
-    logs.push(`[1] isSecureContext: ${window.isSecureContext}`);
-    logs.push(`[2] protocol: ${location.protocol}`);
-    logs.push(`[3] navigator.mediaDevices: ${!!navigator.mediaDevices}`);
-    logs.push(`[4] getDisplayMedia: ${typeof navigator.mediaDevices?.getDisplayMedia}`);
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      logs.push("[5] СТОП: getDisplayMedia недоступен");
-      setCaptureError(logs.join("\n"));
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setCaptureError(`getDisplayMedia недоступен.\nisSecureContext: ${window.isSecureContext}\nprotocol: ${location.protocol}`);
       return;
     }
 
-    logs.push("[5] Вызываю getDisplayMedia...");
-    setCaptureError(logs.join("\n"));
-
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
-      logs.push("[6] Стрим получен ✓");
-      logs.push(`[7] Треки: ${stream.getTracks().map(t => t.kind + "/" + t.label).join(", ")}`);
-      setCaptureError(logs.join("\n"));
-
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        logs.push("[8] srcObject установлен ✓");
-      } else {
-        logs.push("[8] ОШИБКА: videoRef.current = null");
       }
-      setCaptureError(logs.join("\n"));
-
       stream.getVideoTracks()[0].addEventListener("ended", stopCapture);
-      setCapturing(true);
-      setCaptureError(null);
+      setStep("preview");
+      setSelectionMode(true); // сразу включаем режим выделения
     } catch (e: unknown) {
       const err = e as Error;
-      logs.push(`[6] ОШИБКА: ${err.name} — ${err.message}`);
-      logs.push(`[7] stack: ${err.stack?.split("\n")[1] ?? "—"}`);
-      setCaptureError(logs.join("\n"));
+      setCaptureError(`Ошибка: ${err.name} — ${err.message}`);
     }
   }, [stopCapture]);
+
+  // Шаг 3: начать анализ после выделения области
+  const startAnalyzing = useCallback(() => {
+    setCapturing(true);
+    setStep("analyzing");
+    setSelectionMode(false);
+  }, []);
 
   // Основной цикл анализа кадров
   useEffect(() => {
@@ -318,110 +307,124 @@ export default function Index() {
         {tab === "capture" && (
           <div className="space-y-5 animate-fade-in-up">
 
-            {/* Управление захватом */}
+            {/* Шаги */}
             <div className="glass-card rounded-xl p-5">
-              <div className="flex flex-wrap items-center gap-4">
-                <div className="flex-1 min-w-0">
-                  <h2 className="font-display text-sm tracking-widest text-white/60 uppercase mb-1">Захват области реакторов</h2>
-                  <p className="font-mono text-xs text-white/30">
-                    Нажми «Начать захват» → в диалоге браузера выбери вкладку/окно игры
-                  </p>
-                </div>
-                <div className="flex gap-3 flex-wrap">
-                  {!capturing ? (
-                    <button
-                      onClick={startCapture}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm transition-all duration-300"
-                      style={{ background: "linear-gradient(135deg, #00ffcc, #38bdf8)", color: "#080d14", boxShadow: "0 0 20px rgba(0,255,204,0.3)" }}
-                    >
-                      <Icon name="Monitor" size={15} />
-                      Начать захват
-                    </button>
-                  ) : (
-                    <button
-                      onClick={stopCapture}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-all"
-                    >
-                      <Icon name="Square" size={15} />
-                      Остановить
-                    </button>
-                  )}
-                  <a
-                    href={window.location.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-display tracking-widest text-xs border border-white/15 text-white/40 hover:text-white/70 hover:border-white/30 transition-all"
-                  >
-                    <Icon name="ExternalLink" size={13} />
-                    Открыть в новой вкладке
-                  </a>
-                </div>
+
+              {/* Индикатор шагов */}
+              <div className="flex items-center gap-2 mb-5">
+                {[
+                  { n: 1, label: "Захват окна", done: step !== "idle" },
+                  { n: 2, label: "Выделить область", done: !!cropRect },
+                  { n: 3, label: "Начать анализ", done: step === "analyzing" },
+                ].map((s, i) => (
+                  <div key={s.n} className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <div
+                        className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-display transition-all"
+                        style={{
+                          background: s.done ? "rgba(0,255,204,0.2)" : step !== "idle" && s.n === (step === "preview" ? 2 : 3) ? "rgba(250,204,21,0.2)" : "rgba(255,255,255,0.05)",
+                          border: s.done ? "1px solid rgba(0,255,204,0.5)" : step !== "idle" && s.n === (step === "preview" ? 2 : 3) ? "1px solid rgba(250,204,21,0.5)" : "1px solid rgba(255,255,255,0.1)",
+                          color: s.done ? "#00ffcc" : step !== "idle" && s.n === (step === "preview" ? 2 : 3) ? "#facc15" : "rgba(255,255,255,0.3)",
+                        }}
+                      >{s.done ? "✓" : s.n}</div>
+                      <span className="text-xs font-mono hidden sm:inline" style={{ color: s.done ? "#00ffcc" : "rgba(255,255,255,0.3)" }}>{s.label}</span>
+                    </div>
+                    {i < 2 && <div className="w-6 h-px bg-white/10" />}
+                  </div>
+                ))}
               </div>
 
-              {/* Диагностика API */}
-              <div className="mt-3 flex items-center gap-3 flex-wrap">
-                <div className="flex items-center gap-1.5 text-xs font-mono">
-                  <span className={`w-2 h-2 rounded-full ${typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "bg-neon-green" : "bg-red-400"}`} />
-                  <span className="text-white/30">getDisplayMedia:</span>
-                  <span className={typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "text-neon-green" : "text-red-400"}>
-                    {typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "доступен" : "недоступен"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs font-mono">
-                  <span className={`w-2 h-2 rounded-full ${location.protocol === "https:" ? "bg-neon-green" : "bg-yellow-400"}`} />
-                  <span className="text-white/30">HTTPS:</span>
-                  <span className={location.protocol === "https:" ? "text-neon-green" : "text-yellow-400"}>
-                    {location.protocol === "https:" ? "да" : "нет (требуется)"}
-                  </span>
-                </div>
+              <div className="flex flex-wrap gap-3 items-center">
+                {/* Шаг 1 */}
+                {step === "idle" && (
+                  <button
+                    onClick={startPreview}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm transition-all"
+                    style={{ background: "linear-gradient(135deg, #00ffcc, #38bdf8)", color: "#080d14", boxShadow: "0 0 20px rgba(0,255,204,0.3)" }}
+                  >
+                    <Icon name="Monitor" size={15} />
+                    Шаг 1 — Захватить окно игры
+                  </button>
+                )}
+
+                {/* Шаг 2 */}
+                {step === "preview" && (
+                  <>
+                    {!cropRect ? (
+                      <div className="px-4 py-2.5 rounded-xl border border-yellow-400/30 bg-yellow-400/8">
+                        <p className="font-mono text-xs text-yellow-400">↓ Нарисуй прямоугольник мышкой на превью ниже</p>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={startAnalyzing}
+                        className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm transition-all"
+                        style={{ background: "linear-gradient(135deg, #00ffcc, #a855f7)", color: "#080d14", boxShadow: "0 0 20px rgba(0,255,204,0.3)" }}
+                      >
+                        <Icon name="Play" size={15} />
+                        Шаг 3 — Начать анализ
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setSelectionMode(true); setCropRect(null); }}
+                      className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-display tracking-widest border transition-all"
+                      style={{ borderColor: "rgba(250,204,21,0.4)", color: "#facc15", background: "rgba(250,204,21,0.08)" }}
+                    >
+                      <Icon name="Crop" size={12} />
+                      {cropRect ? "Перевыделить" : "Выделить область"}
+                    </button>
+                  </>
+                )}
+
+                {/* Шаг 3 — идёт анализ */}
+                {step === "analyzing" && (
+                  <>
+                    <span className="flex items-center gap-2 text-sm font-display text-neon-green">
+                      <span className="w-2 h-2 rounded-full bg-neon-green animate-pulse" style={{ boxShadow: "0 0 8px #00ffcc" }} />
+                      Анализ идёт...
+                    </span>
+                    <button
+                      onClick={() => { setStep("preview"); setCapturing(false); setCropRect(null); setSelectionMode(true); }}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-display tracking-widest border border-yellow-400/30 text-yellow-400 hover:bg-yellow-400/10 transition-all"
+                    >
+                      <Icon name="Crop" size={12} />
+                      Изменить область
+                    </button>
+                  </>
+                )}
+
+                {/* Стоп — всегда если не idle */}
+                {step !== "idle" && (
+                  <button
+                    onClick={stopCapture}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-display tracking-widest text-xs border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-all"
+                  >
+                    <Icon name="Square" size={13} />
+                    Остановить
+                  </button>
+                )}
               </div>
 
               {captureError && (
-                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed whitespace-pre-wrap">
                   {captureError}
                 </div>
               )}
             </div>
 
-            {/* Превью захвата */}
+            {/* Превью захвата — показываем с шага preview */}
+            {step !== "idle" && (
             <div className="glass-card rounded-xl overflow-hidden">
               <div className="px-5 pt-4 pb-2 flex items-center justify-between flex-wrap gap-2">
                 <span className="font-display text-xs tracking-widest text-white/40 uppercase">Превью захваченного экрана</span>
                 <div className="flex items-center gap-2">
-                  {capturing && (
-                    <>
-                      <span className="flex items-center gap-1.5 text-xs font-mono text-red-400">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                        REC
-                      </span>
-                      {!selectionMode ? (
-                        <button
-                          onClick={() => setSelectionMode(true)}
-                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-display tracking-widest transition-all border"
-                          style={{ borderColor: "rgba(250,204,21,0.4)", color: "#facc15", background: "rgba(250,204,21,0.08)" }}
-                        >
-                          <Icon name="Crop" size={12} />
-                          {cropRect ? "Перевыделить область" : "Выделить область реакторов"}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => { setSelectionMode(false); setDrawing(false); setDrawStart(null); setDrawCurrent(null); }}
-                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-display tracking-widest border border-white/20 text-white/50 hover:text-white/80 transition-all"
-                        >
-                          <Icon name="X" size={12} />
-                          Отмена
-                        </button>
-                      )}
-                      {cropRect && !selectionMode && (
-                        <button
-                          onClick={() => setCropRect(null)}
-                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono border border-white/10 text-white/30 hover:text-white/60 transition-all"
-                        >
-                          <Icon name="Trash2" size={11} />
-                          Сбросить
-                        </button>
-                      )}
-                    </>
+                  {step === "analyzing" && (
+                    <span className="flex items-center gap-1.5 text-xs font-mono text-red-400">
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                      REC
+                    </span>
+                  )}
+                  {step === "preview" && selectionMode && (
+                    <span className="font-mono text-xs text-yellow-400 animate-pulse">✏️ Режим выделения</span>
                   )}
                 </div>
               </div>
@@ -477,7 +480,7 @@ export default function Index() {
                   setDrawCurrent(null);
                 }}
               >
-                {capturing ? (
+                {step !== "idle" ? (
                   <>
                     <video ref={videoRef} className="w-full h-full object-contain" autoPlay muted playsInline />
                     <canvas ref={canvasRef} className="hidden" />
@@ -535,6 +538,7 @@ export default function Index() {
                 )}
               </div>
             </div>
+            )}
 
             {/* Живой анализ пикселей */}
             {capturing && lastFrame && (
