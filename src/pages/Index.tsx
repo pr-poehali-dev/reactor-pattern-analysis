@@ -77,22 +77,34 @@ export default function Index() {
 
   const startCapture = useCallback(async () => {
     setCaptureError(null);
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setCaptureError("getDisplayMedia не поддерживается в этом браузере. Используй Chrome или Edge.");
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 10 },
+        video: true,
         audio: false,
       });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
       }
       stream.getVideoTracks()[0].addEventListener("ended", stopCapture);
       setCapturing(true);
-    } catch {
-      setCaptureError("Не удалось получить доступ к экрану. Разрешите захват окна в браузере.");
+    } catch (e: unknown) {
+      const err = e as Error;
+      if (err.name === "NotAllowedError") {
+        setCaptureError("Доступ запрещён — нажми «Разрешить» в диалоге браузера, либо открой сайт напрямую (не в iframe).");
+      } else if (err.name === "NotSupportedError") {
+        setCaptureError("Браузер не поддерживает захват экрана. Попробуй Chrome 72+.");
+      } else {
+        setCaptureError(`Ошибка: ${err.name} — ${err.message}`);
+      }
     }
-  }, []);
+  }, [stopCapture]);
 
   const stopCapture = useCallback(() => {
     streamRef.current?.getTracks().forEach(t => t.stop());
@@ -271,10 +283,10 @@ export default function Index() {
                 <div className="flex-1 min-w-0">
                   <h2 className="font-display text-sm tracking-widest text-white/60 uppercase mb-1">Захват области реакторов</h2>
                   <p className="font-mono text-xs text-white/30">
-                    Нажми «Начать захват» → выбери окно игры → выдели область с двумя реакторами
+                    Нажми «Начать захват» → в диалоге браузера выбери вкладку/окно игры
                   </p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-3 flex-wrap">
                   {!capturing ? (
                     <button
                       onClick={startCapture}
@@ -293,10 +305,38 @@ export default function Index() {
                       Остановить
                     </button>
                   )}
+                  <a
+                    href={window.location.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-display tracking-widest text-xs border border-white/15 text-white/40 hover:text-white/70 hover:border-white/30 transition-all"
+                  >
+                    <Icon name="ExternalLink" size={13} />
+                    Открыть в новой вкладке
+                  </a>
                 </div>
               </div>
+
+              {/* Диагностика API */}
+              <div className="mt-3 flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-1.5 text-xs font-mono">
+                  <span className={`w-2 h-2 rounded-full ${typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "bg-neon-green" : "bg-red-400"}`} />
+                  <span className="text-white/30">getDisplayMedia:</span>
+                  <span className={typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "text-neon-green" : "text-red-400"}>
+                    {typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia ? "доступен" : "недоступен"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs font-mono">
+                  <span className={`w-2 h-2 rounded-full ${location.protocol === "https:" ? "bg-neon-green" : "bg-yellow-400"}`} />
+                  <span className="text-white/30">HTTPS:</span>
+                  <span className={location.protocol === "https:" ? "text-neon-green" : "text-yellow-400"}>
+                    {location.protocol === "https:" ? "да" : "нет (требуется)"}
+                  </span>
+                </div>
+              </div>
+
               {captureError && (
-                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs">
+                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs leading-relaxed">
                   {captureError}
                 </div>
               )}
@@ -316,7 +356,7 @@ export default function Index() {
               <div className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden" style={{ minHeight: 240 }}>
                 {capturing ? (
                   <>
-                    <video ref={videoRef} className="w-full h-full object-contain" muted playsInline />
+                    <video ref={videoRef} className="w-full h-full object-contain" autoPlay muted playsInline />
                     <canvas ref={canvasRef} className="hidden" />
                     {/* Оверлей разделителя */}
                     <div className="absolute inset-0 pointer-events-none">
