@@ -75,6 +75,16 @@ export default function Index() {
     return () => clearInterval(t);
   }, [capturing]);
 
+  const stopCapture = useCallback(() => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    if (analyzeLoopRef.current) cancelAnimationFrame(analyzeLoopRef.current);
+    setCapturing(false);
+    phaseRef.current = "idle";
+    setRoundPhase("idle");
+    flickerBufRef.current = [];
+  }, []);
+
   const startCapture = useCallback(async () => {
     setCaptureError(null);
 
@@ -105,16 +115,6 @@ export default function Index() {
       }
     }
   }, [stopCapture]);
-
-  const stopCapture = useCallback(() => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    if (analyzeLoopRef.current) cancelAnimationFrame(analyzeLoopRef.current);
-    setCapturing(false);
-    phaseRef.current = "idle";
-    setRoundPhase("idle");
-    flickerBufRef.current = [];
-  }, []);
 
   // Основной цикл анализа кадров
   useEffect(() => {
