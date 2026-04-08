@@ -47,9 +47,15 @@ export default function Index() {
   const [patterns, setPatterns] = useState<Pattern[]>([]);
   const [liveTime, setLiveTime] = useState(new Date());
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
+  const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const analyzeLoopRef = useRef<number | null>(null);
   const roundIdRef = useRef(1);
@@ -147,9 +153,28 @@ export default function Index() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 360;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 360;
+
+      // Если задан cropRect — рисуем только выделенную область
+      if (cropRect) {
+        const previewEl = previewRef.current;
+        const displayW = previewEl?.clientWidth || vw;
+        const displayH = previewEl?.clientHeight || vh;
+        const scaleX = vw / displayW;
+        const scaleY = vh / displayH;
+        const sx = cropRect.x * scaleX;
+        const sy = cropRect.y * scaleY;
+        const sw = cropRect.w * scaleX;
+        const sh = cropRect.h * scaleY;
+        canvas.width = Math.max(sw, 2);
+        canvas.height = Math.max(sh, 2);
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      } else {
+        canvas.width = vw;
+        canvas.height = vh;
+        ctx.drawImage(video, 0, 0, vw, vh);
+      }
 
       const frame = analyzeFrame(ctx, canvas.width, canvas.height);
       setLastFrame(frame);
@@ -360,26 +385,147 @@ export default function Index() {
 
             {/* Превью захвата */}
             <div className="glass-card rounded-xl overflow-hidden">
-              <div className="px-5 pt-4 pb-2 flex items-center justify-between">
+              <div className="px-5 pt-4 pb-2 flex items-center justify-between flex-wrap gap-2">
                 <span className="font-display text-xs tracking-widest text-white/40 uppercase">Превью захваченного экрана</span>
-                {capturing && (
-                  <span className="flex items-center gap-1.5 text-xs font-mono text-red-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                    REC
-                  </span>
-                )}
+                <div className="flex items-center gap-2">
+                  {capturing && (
+                    <>
+                      <span className="flex items-center gap-1.5 text-xs font-mono text-red-400">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                        REC
+                      </span>
+                      {!selectionMode ? (
+                        <button
+                          onClick={() => setSelectionMode(true)}
+                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-display tracking-widest transition-all border"
+                          style={{ borderColor: "rgba(250,204,21,0.4)", color: "#facc15", background: "rgba(250,204,21,0.08)" }}
+                        >
+                          <Icon name="Crop" size={12} />
+                          {cropRect ? "Перевыделить область" : "Выделить область реакторов"}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => { setSelectionMode(false); setDrawing(false); setDrawStart(null); setDrawCurrent(null); }}
+                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-display tracking-widest border border-white/20 text-white/50 hover:text-white/80 transition-all"
+                        >
+                          <Icon name="X" size={12} />
+                          Отмена
+                        </button>
+                      )}
+                      {cropRect && !selectionMode && (
+                        <button
+                          onClick={() => setCropRect(null)}
+                          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono border border-white/10 text-white/30 hover:text-white/60 transition-all"
+                        >
+                          <Icon name="Trash2" size={11} />
+                          Сбросить
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden" style={{ minHeight: 240 }}>
+
+              {selectionMode && (
+                <div className="mx-4 mb-2 px-3 py-2 rounded-lg bg-yellow-400/10 border border-yellow-400/30">
+                  <p className="font-mono text-xs text-yellow-400">Нарисуй прямоугольник мышкой поверх двух реакторов (Альфа слева, Омега справа)</p>
+                </div>
+              )}
+
+              {cropRect && !selectionMode && (
+                <div className="mx-4 mb-2 px-3 py-2 rounded-lg bg-neon-green/10 border border-neon-green/20 flex items-center gap-2">
+                  <Icon name="CheckCircle" size={12} className="text-neon-green" />
+                  <p className="font-mono text-xs text-neon-green">
+                    Область задана: {Math.round(cropRect.x)},{Math.round(cropRect.y)} → {Math.round(cropRect.w)}×{Math.round(cropRect.h)}px
+                  </p>
+                </div>
+              )}
+
+              <div
+                ref={previewRef}
+                className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden"
+                style={{ minHeight: 240, cursor: selectionMode ? "crosshair" : "default" }}
+                onMouseDown={e => {
+                  if (!selectionMode) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const y = e.clientY - rect.top;
+                  setDrawing(true);
+                  setDrawStart({ x, y });
+                  setDrawCurrent({ x, y });
+                }}
+                onMouseMove={e => {
+                  if (!selectionMode || !drawing) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDrawCurrent({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                }}
+                onMouseUp={e => {
+                  if (!selectionMode || !drawing || !drawStart) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const ex = e.clientX - rect.left;
+                  const ey = e.clientY - rect.top;
+                  const x = Math.min(drawStart.x, ex);
+                  const y = Math.min(drawStart.y, ey);
+                  const w = Math.abs(ex - drawStart.x);
+                  const h = Math.abs(ey - drawStart.y);
+                  if (w > 10 && h > 10) {
+                    setCropRect({ x, y, w, h });
+                    setSelectionMode(false);
+                  }
+                  setDrawing(false);
+                  setDrawStart(null);
+                  setDrawCurrent(null);
+                }}
+              >
                 {capturing ? (
                   <>
                     <video ref={videoRef} className="w-full h-full object-contain" autoPlay muted playsInline />
                     <canvas ref={canvasRef} className="hidden" />
-                    {/* Оверлей разделителя */}
-                    <div className="absolute inset-0 pointer-events-none">
-                      <div className="absolute top-0 bottom-0 left-1/2 w-px bg-white/20" />
-                      <div className="absolute top-2 left-4 text-xs font-display text-cyan-400/70 tracking-widest">α АЛЬФА</div>
-                      <div className="absolute top-2 right-4 text-xs font-display text-purple-400/70 tracking-widest">ω ОМЕГА</div>
-                    </div>
+
+                    {/* Оверлей выделения */}
+                    {selectionMode && drawing && drawStart && drawCurrent && (
+                      <div
+                        className="absolute border-2 border-yellow-400 pointer-events-none"
+                        style={{
+                          left: Math.min(drawStart.x, drawCurrent.x),
+                          top: Math.min(drawStart.y, drawCurrent.y),
+                          width: Math.abs(drawCurrent.x - drawStart.x),
+                          height: Math.abs(drawCurrent.y - drawStart.y),
+                          background: "rgba(250,204,21,0.08)",
+                          boxShadow: "0 0 0 1px rgba(250,204,21,0.3)",
+                        }}
+                      >
+                        <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full px-2 py-0.5 bg-yellow-400 text-black text-xs font-mono whitespace-nowrap" style={{ fontSize: 10 }}>
+                          {Math.round(Math.abs(drawCurrent.x - drawStart.x))} × {Math.round(Math.abs(drawCurrent.y - drawStart.y))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Активная область анализа */}
+                    {cropRect && !selectionMode && (
+                      <div
+                        className="absolute pointer-events-none"
+                        style={{
+                          left: cropRect.x, top: cropRect.y,
+                          width: cropRect.w, height: cropRect.h,
+                          border: "2px solid rgba(0,255,204,0.6)",
+                          boxShadow: "0 0 12px rgba(0,255,204,0.2), inset 0 0 12px rgba(0,255,204,0.04)",
+                        }}
+                      >
+                        <div className="absolute top-1 left-1 text-xs font-display text-cyan-400/80 tracking-widest" style={{ fontSize: 10 }}>α</div>
+                        <div className="absolute top-0 bottom-0 left-1/2 w-px bg-white/20" />
+                        <div className="absolute top-1 right-1 text-xs font-display text-purple-400/80 tracking-widest" style={{ fontSize: 10 }}>ω</div>
+                      </div>
+                    )}
+
+                    {/* Подсказка если нет выделения */}
+                    {!cropRect && !selectionMode && (
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <div className="px-4 py-2 rounded-lg bg-black/60 border border-yellow-400/30">
+                          <p className="font-mono text-xs text-yellow-400/80">Нажми «Выделить область реакторов»</p>
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div className="flex flex-col items-center justify-center h-60 gap-3">
