@@ -1,130 +1,213 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import { analyzeFrame, computeFlickerStats } from "@/lib/screenAnalyzer";
+import { predict, getTopPatterns } from "@/lib/mlPredictor";
+import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
+import type { Prediction, Pattern } from "@/lib/mlPredictor";
 
-const REACTORS = ["R-01", "R-02", "R-03", "R-04", "R-05", "R-06", "R-07", "R-08"];
-const COLUMNS = ["A", "B", "C", "D", "E", "F"];
+type Tab = "capture" | "history" | "prediction" | "stats" | "model";
 
-type Tab = "monitor" | "history" | "prediction" | "stats" | "model";
-
-interface SelectionEvent {
-  id: number;
-  reactor: string;
-  column: string;
-  timestamp: Date;
-  interval: number | null;
+function fmt(ts: number) {
+  return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-function generateEvent(id: number, prev: SelectionEvent | null): SelectionEvent {
-  const reactor = REACTORS[Math.floor(Math.random() * REACTORS.length)];
-  const column = COLUMNS[Math.floor(Math.random() * COLUMNS.length)];
-  const now = new Date();
-  const interval = prev ? Math.round((now.getTime() - prev.timestamp.getTime()) / 1000) : null;
-  return { id, reactor, column, timestamp: now, interval };
-}
-
-const INITIAL_EVENTS: SelectionEvent[] = (() => {
-  const evts: SelectionEvent[] = [];
-  const now = Date.now();
-  for (let i = 0; i < 20; i++) {
-    const ts = new Date(now - (20 - i) * (3000 + Math.random() * 5000));
-    evts.push({
-      id: i + 1,
-      reactor: REACTORS[Math.floor(Math.random() * REACTORS.length)],
-      column: COLUMNS[Math.floor(Math.random() * COLUMNS.length)],
-      timestamp: ts,
-      interval: i === 0 ? null : Math.round((ts.getTime() - (evts[i - 1]?.timestamp.getTime() ?? ts.getTime())) / 1000),
-    });
-  }
-  return evts;
-})();
-
-const PATTERNS = [
-  { seq: ["A", "B", "C"], confidence: 0.82, count: 14, label: "Восходящий" },
-  { seq: ["C", "C", "D"], confidence: 0.71, count: 9, label: "Повтор-сдвиг" },
-  { seq: ["F", "E", "D", "C"], confidence: 0.65, count: 6, label: "Нисходящий" },
-  { seq: ["A", "D", "A"], confidence: 0.58, count: 5, label: "Зеркальный" },
-];
-
-function fmt(d: Date) {
-  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function StatusDot({ active }: { active: boolean }) {
+function ReactorBadge({ reactor, size = "md" }: { reactor: "alpha" | "omega" | null; size?: "sm" | "md" | "lg" }) {
+  if (!reactor) return <span className="text-white/30 font-mono">—</span>;
+  const sizes = { sm: "text-xs px-2 py-0.5", md: "text-sm px-3 py-1", lg: "text-xl px-5 py-2 font-display tracking-widest" };
+  const styles = reactor === "alpha"
+    ? "bg-cyan-500/15 border border-cyan-500/40 text-cyan-300"
+    : "bg-purple-500/15 border border-purple-500/40 text-purple-300";
   return (
-    <span
-      className={`inline-block w-2 h-2 rounded-full ${active ? "bg-neon-green animate-pulse-glow" : "bg-gray-600"}`}
-      style={active ? { boxShadow: "0 0 8px #00ffcc" } : {}}
-    />
+    <span className={`rounded-lg font-bold ${sizes[size]} ${styles}`}>
+      {reactor === "alpha" ? "α Альфа" : "ω Омега"}
+    </span>
   );
 }
 
-function SectionCard({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function ConfBar({ value, color = "#00ffcc" }: { value: number; color?: string }) {
   return (
-    <div className={`glass-card rounded-xl p-5 ${className}`}>{children}</div>
-  );
-}
-
-function SectionTitle({ icon, label }: { icon: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2 mb-4">
-      <Icon name={icon} size={16} className="text-neon-green" />
-      <h3 className="font-display text-sm tracking-widest uppercase text-neon-green opacity-80">{label}</h3>
+    <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+      <div
+        className="h-full rounded-full transition-all duration-500"
+        style={{ width: `${value * 100}%`, background: color, boxShadow: `0 0 8px ${color}88` }}
+      />
     </div>
   );
 }
 
 export default function Index() {
-  const [tab, setTab] = useState<Tab>("monitor");
-  const [events, setEvents] = useState<SelectionEvent[]>(INITIAL_EVENTS);
-  const [activeReactor, setActiveReactor] = useState<string>("R-03");
-  const [activeColumn, setActiveColumn] = useState<string>("B");
-  const [tick, setTick] = useState(0);
-  const idRef = useRef(INITIAL_EVENTS.length + 1);
+  const [tab, setTab] = useState<Tab>("capture");
+  const [capturing, setCapturing] = useState(false);
+  const [history, setHistory] = useState<RoundResult[]>([]);
+  const [prediction, setPrediction] = useState<Prediction | null>(null);
+  const [lastFrame, setLastFrame] = useState<FrameAnalysis | null>(null);
+  const [flickerSamples, setFlickerSamples] = useState<FlickerSample[]>([]);
+  const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
+  const [countdown, setCountdown] = useState<number>(30);
+  const [patterns, setPatterns] = useState<Pattern[]>([]);
   const [liveTime, setLiveTime] = useState(new Date());
+  const [captureError, setCaptureError] = useState<string | null>(null);
 
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const analyzeLoopRef = useRef<number | null>(null);
+  const roundIdRef = useRef(1);
+  const lastResultTsRef = useRef<number>(0);
+  const flickerBufRef = useRef<FlickerSample[]>([]);
+  const phaseRef = useRef<"idle" | "flicker" | "result">("idle");
+
+  // Живые часы
   useEffect(() => {
-    const interval = setInterval(() => {
-      setLiveTime(new Date());
-      setTick((t) => t + 1);
-      if (Math.random() < 0.35) {
-        setEvents((prev) => {
-          const newEvt = generateEvent(idRef.current++, prev[prev.length - 1] ?? null);
-          setActiveReactor(newEvt.reactor);
-          setActiveColumn(newEvt.column);
-          return [...prev.slice(-49), newEvt];
-        });
-      }
-    }, 1800);
-    return () => clearInterval(interval);
+    const t = setInterval(() => setLiveTime(new Date()), 1000);
+    return () => clearInterval(t);
   }, []);
 
-  const colCounts = COLUMNS.reduce((acc, c) => {
-    acc[c] = events.filter((e) => e.column === c).length;
-    return acc;
-  }, {} as Record<string, number>);
-  const maxColCount = Math.max(...Object.values(colCounts), 1);
+  // Обратный отсчёт 30 секунд
+  useEffect(() => {
+    if (!capturing) return;
+    const t = setInterval(() => {
+      setCountdown(prev => {
+        const next = prev <= 1 ? 30 : prev - 1;
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [capturing]);
 
-  const reactorCounts = REACTORS.reduce((acc, r) => {
-    acc[r] = events.filter((e) => e.reactor === r).length;
-    return acc;
-  }, {} as Record<string, number>);
-  const totalEvents = events.length;
+  const startCapture = useCallback(async () => {
+    setCaptureError(null);
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 10 },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      stream.getVideoTracks()[0].addEventListener("ended", stopCapture);
+      setCapturing(true);
+    } catch {
+      setCaptureError("Не удалось получить доступ к экрану. Разрешите захват окна в браузере.");
+    }
+  }, []);
 
-  const lastEvent = events[events.length - 1];
-  const predictedCol = COLUMNS[(COLUMNS.indexOf(lastEvent?.column ?? "A") + 1) % COLUMNS.length];
-  const predictedReactor = lastEvent?.reactor ?? "R-01";
-  const confidence = 0.72 + Math.sin(tick * 0.3) * 0.08;
+  const stopCapture = useCallback(() => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    if (analyzeLoopRef.current) cancelAnimationFrame(analyzeLoopRef.current);
+    setCapturing(false);
+    phaseRef.current = "idle";
+    setRoundPhase("idle");
+    flickerBufRef.current = [];
+  }, []);
 
-  const intervals = events.filter((e) => e.interval !== null).map((e) => e.interval as number);
-  const avgInterval = intervals.length > 0 ? Math.round(intervals.reduce((a, b) => a + b, 0) / intervals.length) : 0;
+  // Основной цикл анализа кадров
+  useEffect(() => {
+    if (!capturing) return;
+
+    const loop = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || video.readyState < 2) {
+        analyzeLoopRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 360;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const frame = analyzeFrame(ctx, canvas.width, canvas.height);
+      setLastFrame(frame);
+
+      const now = frame.timestamp;
+      const prevPhase = phaseRef.current;
+
+      // Детектируем мерцание
+      if (frame.phase === "flicker") {
+        phaseRef.current = "flicker";
+        setRoundPhase("flicker");
+        const dominant = frame.alphaYellow >= frame.omegaYellow ? "alpha" : "omega";
+        flickerBufRef.current.push({ timestamp: now, dominant });
+        // Оставляем только последние 6 секунд
+        flickerBufRef.current = flickerBufRef.current.filter(s => now - s.timestamp < 6000);
+        setFlickerSamples([...flickerBufRef.current]);
+      }
+
+      // Детектируем результат (стабильный жёлтый > 0.5 сек после последнего результата)
+      if (frame.phase === "result" && frame.winner && now - lastResultTsRef.current > 15000) {
+        lastResultTsRef.current = now;
+        phaseRef.current = "result";
+        setRoundPhase("result");
+
+        const flickerStats = computeFlickerStats(flickerBufRef.current);
+        const newResult: RoundResult = {
+          id: roundIdRef.current++,
+          winner: frame.winner,
+          timestamp: now,
+          flickerPattern: [...flickerBufRef.current],
+          flickerRate: flickerStats.rate,
+          flickerBias: flickerStats.bias,
+        };
+
+        setHistory(prev => {
+          const next = [...prev, newResult];
+          const pred = predict(next, flickerStats.bias, flickerStats.rate);
+          setPrediction(pred);
+          setPatterns(getTopPatterns(next));
+          return next;
+        });
+
+        flickerBufRef.current = [];
+        setFlickerSamples([]);
+
+        // Через 3 сек возвращаемся в idle
+        setTimeout(() => {
+          phaseRef.current = "idle";
+          setRoundPhase("idle");
+        }, 3000);
+      }
+
+      // Если фаза была flicker, а теперь idle — обновить предсказание с учётом мерцания
+      if (prevPhase === "flicker" && frame.phase === "idle" && flickerBufRef.current.length > 3) {
+        const flickerStats = computeFlickerStats(flickerBufRef.current);
+        setHistory(prev => {
+          const pred = predict(prev, flickerStats.bias, flickerStats.rate);
+          setPrediction(pred);
+          return prev;
+        });
+      }
+
+      analyzeLoopRef.current = requestAnimationFrame(loop);
+    };
+
+    analyzeLoopRef.current = requestAnimationFrame(loop);
+    return () => {
+      if (analyzeLoopRef.current) cancelAnimationFrame(analyzeLoopRef.current);
+    };
+  }, [capturing]);
+
+  const flickerStats = computeFlickerStats(flickerSamples);
+  const totalRounds = history.length;
+  const alphaWins = history.filter(r => r.winner === "alpha").length;
+  const omegaWins = history.filter(r => r.winner === "omega").length;
 
   const TABS: { id: Tab; icon: string; label: string }[] = [
-    { id: "monitor", icon: "Activity", label: "Мониторинг" },
+    { id: "capture", icon: "Monitor", label: "Захват" },
     { id: "history", icon: "Clock", label: "История" },
     { id: "prediction", icon: "Zap", label: "Предсказание" },
     { id: "stats", icon: "BarChart2", label: "Статистика" },
     { id: "model", icon: "Cpu", label: "Модель ML" },
   ];
+
+  const phaseColor = roundPhase === "result" ? "#00ffcc" : roundPhase === "flicker" ? "#facc15" : "#64748b";
+  const phaseLabel = roundPhase === "result" ? "РЕЗУЛЬТАТ" : roundPhase === "flicker" ? "МЕРЦАНИЕ" : "ОЖИДАНИЕ";
 
   return (
     <div className="min-h-screen pattern-dot">
@@ -136,23 +219,20 @@ export default function Index() {
               <div className="w-8 h-8 rounded-lg bg-neon-green/10 border border-neon-green/30 flex items-center justify-center">
                 <Icon name="Atom" size={16} className="text-neon-green" />
               </div>
-              <div>
-                <span className="font-display text-white text-lg tracking-widest">REACTOR<span className="text-neon-green">OS</span></span>
-                <span className="hidden sm:inline ml-3 font-mono text-xs text-white/30 tracking-widest">v2.4.1</span>
-              </div>
+              <span className="font-display text-white text-lg tracking-widest">REACTOR<span className="text-neon-green">OS</span></span>
             </div>
-            <div className="flex items-center gap-4">
-              <div className="hidden md:flex items-center gap-2 text-xs font-mono text-white/40">
-                <StatusDot active={true} />
-                <span className="text-neon-green/70">{fmt(liveTime)}</span>
-              </div>
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neon-green/10 border border-neon-green/20">
-                <StatusDot active={true} />
-                <span className="text-neon-green text-xs font-mono font-medium">ONLINE</span>
+            <div className="flex items-center gap-3">
+              <span className="font-mono text-xs text-white/30 hidden md:inline">{liveTime.toLocaleTimeString("ru-RU")}</span>
+              <div
+                className="flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-mono font-medium transition-all duration-300"
+                style={{ borderColor: `${phaseColor}44`, background: `${phaseColor}11`, color: phaseColor }}
+              >
+                <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: phaseColor }} />
+                {phaseLabel}
               </div>
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-neon-purple/10 border border-neon-purple/20">
                 <Icon name="Database" size={12} className="text-neon-purple" />
-                <span className="text-neon-purple text-xs font-mono">{totalEvents} evt</span>
+                <span className="text-neon-purple text-xs font-mono">{totalRounds} раундов</span>
               </div>
             </div>
           </div>
@@ -162,8 +242,8 @@ export default function Index() {
       {/* Tabs */}
       <div className="sticky top-14 z-40 bg-[#080d14]/80 backdrop-blur-xl border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex gap-0 overflow-x-auto">
-            {TABS.map((t) => (
+          <div className="flex overflow-x-auto">
+            {TABS.map(t => (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
@@ -179,116 +259,192 @@ export default function Index() {
         </div>
       </div>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
 
-        {/* ── МОНИТОРИНГ ── */}
-        {tab === "monitor" && (
+        {/* ── ЗАХВАТ ЭКРАНА ── */}
+        {tab === "capture" && (
           <div className="space-y-5 animate-fade-in-up">
-            <div className="glass-card rounded-xl px-6 py-4 flex flex-wrap items-center gap-6">
-              <div>
-                <p className="text-white/30 text-xs font-mono uppercase tracking-widest mb-1">Активный реактор</p>
-                <p className="font-display text-3xl text-neon-green" style={{ textShadow: "0 0 20px rgba(0,255,204,0.5)" }}>{activeReactor}</p>
+
+            {/* Управление захватом */}
+            <div className="glass-card rounded-xl p-5">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <h2 className="font-display text-sm tracking-widest text-white/60 uppercase mb-1">Захват области реакторов</h2>
+                  <p className="font-mono text-xs text-white/30">
+                    Нажми «Начать захват» → выбери окно игры → выдели область с двумя реакторами
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  {!capturing ? (
+                    <button
+                      onClick={startCapture}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm transition-all duration-300"
+                      style={{ background: "linear-gradient(135deg, #00ffcc, #38bdf8)", color: "#080d14", boxShadow: "0 0 20px rgba(0,255,204,0.3)" }}
+                    >
+                      <Icon name="Monitor" size={15} />
+                      Начать захват
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopCapture}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-display tracking-widest text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-all"
+                    >
+                      <Icon name="Square" size={15} />
+                      Остановить
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="w-px h-10 bg-white/10" />
-              <div>
-                <p className="text-white/30 text-xs font-mono uppercase tracking-widest mb-1">Колонка</p>
-                <p className="font-display text-3xl text-neon-purple" style={{ textShadow: "0 0 20px rgba(168,85,247,0.5)" }}>{activeColumn}</p>
+              {captureError && (
+                <div className="mt-3 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 font-mono text-xs">
+                  {captureError}
+                </div>
+              )}
+            </div>
+
+            {/* Превью захвата */}
+            <div className="glass-card rounded-xl overflow-hidden">
+              <div className="px-5 pt-4 pb-2 flex items-center justify-between">
+                <span className="font-display text-xs tracking-widest text-white/40 uppercase">Превью захваченного экрана</span>
+                {capturing && (
+                  <span className="flex items-center gap-1.5 text-xs font-mono text-red-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                    REC
+                  </span>
+                )}
               </div>
-              <div className="w-px h-10 bg-white/10" />
-              <div>
-                <p className="text-white/30 text-xs font-mono uppercase tracking-widest mb-1">Последнее событие</p>
-                <p className="font-mono text-sm text-white/70">{lastEvent ? fmt(lastEvent.timestamp) : "—"}</p>
-              </div>
-              <div className="ml-auto">
-                <div className="w-3 h-3 rounded-full bg-neon-green animate-pulse" style={{ boxShadow: "0 0 15px #00ffcc" }} />
+              <div className="relative bg-black/40 mx-4 mb-4 rounded-lg overflow-hidden" style={{ minHeight: 240 }}>
+                {capturing ? (
+                  <>
+                    <video ref={videoRef} className="w-full h-full object-contain" muted playsInline />
+                    <canvas ref={canvasRef} className="hidden" />
+                    {/* Оверлей разделителя */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div className="absolute top-0 bottom-0 left-1/2 w-px bg-white/20" />
+                      <div className="absolute top-2 left-4 text-xs font-display text-cyan-400/70 tracking-widest">α АЛЬФА</div>
+                      <div className="absolute top-2 right-4 text-xs font-display text-purple-400/70 tracking-widest">ω ОМЕГА</div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-60 gap-3">
+                    <Icon name="Monitor" size={40} className="text-white/10" />
+                    <p className="font-mono text-xs text-white/20">Захват не активен</p>
+                  </div>
+                )}
               </div>
             </div>
 
-            <SectionCard>
-              <SectionTitle icon="Server" label="Реакторы — уровень активности" />
-              <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
-                {REACTORS.map((r) => {
-                  const active = r === activeReactor;
-                  const pct = Math.round((reactorCounts[r] / totalEvents) * 100);
-                  const maxRCount = Math.max(...Object.values(reactorCounts), 1);
-                  return (
-                    <div
-                      key={r}
-                      className={`relative rounded-lg border p-3 text-center transition-all duration-500 cursor-default ${
-                        active ? "reactor-col-active" : "reactor-col-inactive"
-                      }`}
-                    >
-                      <p className={`font-display text-xs tracking-widest mb-2 ${active ? "text-neon-green" : "text-white/40"}`}>{r}</p>
-                      <div className="h-16 flex flex-col justify-end mb-2">
-                        <div
-                          className="w-full rounded-sm transition-all duration-700"
-                          style={{
-                            height: `${Math.max(8, (reactorCounts[r] / maxRCount) * 64)}px`,
-                            background: active
-                              ? "linear-gradient(180deg, #00ffcc, #00ffcc44)"
-                              : "linear-gradient(180deg, rgba(56,189,248,0.5), rgba(56,189,248,0.1))",
-                            boxShadow: active ? "0 0 12px rgba(0,255,204,0.4)" : "none",
-                          }}
-                        />
-                      </div>
-                      <p className={`font-mono text-xs ${active ? "text-neon-green" : "text-white/30"}`}>{pct}%</p>
-                      {active && (
-                        <div className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-neon-green animate-pulse" style={{ boxShadow: "0 0 6px #00ffcc" }} />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </SectionCard>
-
-            <SectionCard>
-              <SectionTitle icon="Columns" label="Колонки — распределение выборов" />
-              <div className="flex items-end gap-3 h-40">
-                {COLUMNS.map((c) => {
-                  const active = c === activeColumn;
-                  const h = Math.max(8, Math.round((colCounts[c] / maxColCount) * 120));
-                  return (
-                    <div key={c} className="flex-1 flex flex-col items-center gap-2">
-                      <span className={`font-mono text-xs ${active ? "text-neon-green" : "text-white/30"}`}>{colCounts[c]}</span>
-                      <div className="w-full flex flex-col justify-end" style={{ height: 120 }}>
-                        <div
-                          className="w-full rounded-t-md transition-all duration-700"
-                          style={{
-                            height: h,
-                            background: active
-                              ? "linear-gradient(180deg, #00ffcc, #00ffcc55)"
-                              : "linear-gradient(180deg, rgba(168,85,247,0.6), rgba(168,85,247,0.15))",
-                            boxShadow: active ? "0 0 16px rgba(0,255,204,0.5)" : "none",
-                          }}
-                        />
-                      </div>
-                      <span className={`font-display text-sm tracking-widest ${active ? "text-neon-green" : "text-white/50"}`}>{c}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </SectionCard>
-
-            <SectionCard>
-              <SectionTitle icon="Radio" label="Поток событий (live)" />
-              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                {[...events].reverse().slice(0, 12).map((e, i) => (
-                  <div
-                    key={e.id}
-                    className={`flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-mono transition-all duration-300 ${
-                      i === 0 ? "bg-neon-green/10 border border-neon-green/20" : "bg-white/3 border border-transparent"
-                    }`}
-                  >
-                    <span className="text-white/25 w-8 text-right flex-shrink-0">#{e.id}</span>
-                    <span className={`font-bold w-10 ${i === 0 ? "text-neon-green" : "text-neon-blue/80"}`}>{e.reactor}</span>
-                    <span className={`w-6 text-center font-bold ${i === 0 ? "text-neon-purple" : "text-neon-purple/60"}`}>{e.column}</span>
-                    <span className="text-white/40 flex-1">{fmt(e.timestamp)}</span>
-                    {e.interval !== null && <span className="text-white/25">+{e.interval}с</span>}
-                    {i === 0 && <span className="text-neon-green animate-blink">▌</span>}
+            {/* Живой анализ пикселей */}
+            {capturing && lastFrame && (
+              <div className="grid grid-cols-2 gap-4">
+                {/* Альфа */}
+                <div className="glass-card rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="w-3 h-3 rounded-full bg-cyan-400" style={{ boxShadow: "0 0 8px #22d3ee" }} />
+                    <span className="font-display text-xs tracking-widest text-cyan-400">α РЕАКТОР АЛЬФА</span>
                   </div>
-                ))}
+                  <div className="mb-2">
+                    <div className="flex justify-between mb-1">
+                      <span className="font-mono text-xs text-white/40">Жёлтый сигнал</span>
+                      <span className="font-mono text-xs text-yellow-400">{(lastFrame.alphaYellow * 100).toFixed(2)}%</span>
+                    </div>
+                    <ConfBar value={Math.min(lastFrame.alphaYellow * 10, 1)} color="#facc15" />
+                  </div>
+                  {roundPhase === "result" && lastFrame.winner === "alpha" && (
+                    <div className="mt-3 text-center py-2 rounded-lg bg-neon-green/10 border border-neon-green/30">
+                      <span className="font-display text-sm text-neon-green tracking-widest">✓ SUCCESS</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Омега */}
+                <div className="glass-card-purple rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="w-3 h-3 rounded-full bg-purple-400" style={{ boxShadow: "0 0 8px #c084fc" }} />
+                    <span className="font-display text-xs tracking-widest text-purple-400">ω РЕАКТОР ОМЕГА</span>
+                  </div>
+                  <div className="mb-2">
+                    <div className="flex justify-between mb-1">
+                      <span className="font-mono text-xs text-white/40">Жёлтый сигнал</span>
+                      <span className="font-mono text-xs text-yellow-400">{(lastFrame.omegaYellow * 100).toFixed(2)}%</span>
+                    </div>
+                    <ConfBar value={Math.min(lastFrame.omegaYellow * 10, 1)} color="#facc15" />
+                  </div>
+                  {roundPhase === "result" && lastFrame.winner === "omega" && (
+                    <div className="mt-3 text-center py-2 rounded-lg bg-purple-500/10 border border-purple-500/30">
+                      <span className="font-display text-sm text-purple-300 tracking-widest">✓ SUCCESS</span>
+                    </div>
+                  )}
+                </div>
               </div>
-            </SectionCard>
+            )}
+
+            {/* Мерцание в реальном времени */}
+            {roundPhase === "flicker" && flickerSamples.length > 0 && (
+              <div className="glass-card rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icon name="Zap" size={14} className="text-yellow-400" />
+                  <span className="font-display text-xs tracking-widest text-yellow-400 uppercase">Анализ мерцания (live)</span>
+                </div>
+                <div className="grid grid-cols-3 gap-4 mb-4">
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-1">Темп</p>
+                    <p className="font-display text-xl text-yellow-400">{flickerStats.rate.toFixed(1)}<span className="text-xs text-white/30 ml-1">/сек</span></p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-1">Альфа %</p>
+                    <p className="font-display text-xl text-cyan-400">{Math.round(flickerStats.alphaPct * 100)}%</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-1">Омега %</p>
+                    <p className="font-display text-xl text-purple-400">{Math.round(flickerStats.omegaPct * 100)}%</p>
+                  </div>
+                </div>
+                {/* Визуализация последних сэмплов */}
+                <div className="flex gap-1 flex-wrap">
+                  {flickerSamples.slice(-30).map((s, i) => (
+                    <div
+                      key={i}
+                      className="w-4 h-6 rounded-sm transition-all"
+                      style={{
+                        background: s.dominant === "alpha" ? "rgba(34,211,238,0.7)" : "rgba(192,132,252,0.7)",
+                        boxShadow: s.dominant === "alpha" ? "0 0 4px #22d3ee" : "0 0 4px #c084fc",
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="flex justify-between mt-1">
+                  <span className="font-mono text-xs text-white/20">← раньше</span>
+                  <span className="font-mono text-xs text-yellow-400">сейчас →</span>
+                </div>
+              </div>
+            )}
+
+            {/* Быстрое предсказание на главном экране */}
+            {prediction && prediction.reactor && (
+              <div
+                className="rounded-xl p-5 border"
+                style={{
+                  background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.06)" : "rgba(192,132,252,0.06)",
+                  borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
+                  boxShadow: prediction.reactor === "alpha" ? "0 0 30px rgba(34,211,238,0.1)" : "0 0 30px rgba(192,132,252,0.1)",
+                }}
+              >
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-2">Следующий победитель</p>
+                    <ReactorBadge reactor={prediction.reactor} size="lg" />
+                    <p className="font-mono text-xs text-white/40 mt-2">{prediction.reason}</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-display text-4xl" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc", textShadow: `0 0 20px currentColor` }}>
+                      {Math.round(prediction.confidence * 100)}%
+                    </p>
+                    <p className="font-mono text-xs text-white/30 mt-1">уверенность</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -297,249 +453,348 @@ export default function Index() {
           <div className="space-y-5 animate-fade-in-up">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {[
-                { label: "Всего событий", value: totalEvents, icon: "List", color: "text-neon-green" },
-                { label: "Ср. интервал", value: `${avgInterval}с`, icon: "Timer", color: "text-neon-blue" },
-                { label: "Мин. интервал", value: intervals.length ? `${Math.min(...intervals)}с` : "—", icon: "ArrowDown", color: "text-neon-purple" },
-                { label: "Макс. интервал", value: intervals.length ? `${Math.max(...intervals)}с` : "—", icon: "ArrowUp", color: "text-neon-orange" },
-              ].map((s) => (
-                <SectionCard key={s.label} className="text-center">
-                  <Icon name={s.icon} size={18} className={`${s.color} mx-auto mb-2`} />
+                { label: "Раундов", value: totalRounds, color: "text-neon-green", icon: "List" },
+                { label: "Альфа побед", value: alphaWins, color: "text-cyan-400", icon: "Zap" },
+                { label: "Омега побед", value: omegaWins, color: "text-purple-400", icon: "Zap" },
+                { label: "% Альфа", value: totalRounds ? `${Math.round(alphaWins / totalRounds * 100)}%` : "—", color: "text-yellow-400", icon: "BarChart2" },
+              ].map(s => (
+                <div key={s.label} className="glass-card rounded-xl p-4 text-center">
+                  <Icon name={s.icon} size={16} className={`${s.color} mx-auto mb-2`} />
                   <p className={`font-display text-2xl ${s.color}`}>{s.value}</p>
                   <p className="text-white/40 text-xs mt-1">{s.label}</p>
-                </SectionCard>
+                </div>
               ))}
             </div>
 
-            <SectionCard>
-              <SectionTitle icon="Clock" label="Таблица событий" />
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs font-mono">
-                  <thead>
-                    <tr className="border-b border-white/10">
-                      {["ID", "РЕАКТОР", "КОЛОНКА", "ВРЕМЯ", "ИНТЕРВАЛ"].map((h) => (
-                        <th key={h} className="text-left py-2 px-3 text-white/30 font-normal tracking-widest">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...events].reverse().map((e, i) => (
-                      <tr key={e.id} className={`border-b border-white/5 transition-colors ${i === 0 ? "bg-neon-green/5" : "hover:bg-white/3"}`}>
-                        <td className="py-2.5 px-3 text-white/25">#{e.id}</td>
-                        <td className="py-2.5 px-3 text-neon-blue font-bold">{e.reactor}</td>
-                        <td className="py-2.5 px-3">
-                          <span className="inline-flex items-center justify-center w-7 h-7 rounded bg-neon-purple/15 border border-neon-purple/25 text-neon-purple font-bold">{e.column}</span>
-                        </td>
-                        <td className="py-2.5 px-3 text-white/60">{fmt(e.timestamp)}</td>
-                        <td className="py-2.5 px-3 text-white/40">
-                          {e.interval !== null
-                            ? <span className={e.interval < avgInterval ? "text-neon-green" : "text-neon-orange"}>+{e.interval}с</span>
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {history.length === 0 ? (
+              <div className="glass-card rounded-xl p-10 text-center">
+                <Icon name="Clock" size={36} className="text-white/10 mx-auto mb-3" />
+                <p className="font-mono text-sm text-white/30">Раундов пока нет — запусти захват экрана</p>
               </div>
-            </SectionCard>
+            ) : (
+              <div className="glass-card rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icon name="Clock" size={14} className="text-neon-green" />
+                  <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Таблица раундов</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs font-mono">
+                    <thead>
+                      <tr className="border-b border-white/10">
+                        {["#", "ПОБЕДИТЕЛЬ", "ВРЕМЯ", "ТЕМП МЕЦ.", "СМЕЩЕНИЕ", "МЕЦ. ПОДСКАЗКА"].map(h => (
+                          <th key={h} className="text-left py-2 px-3 text-white/30 font-normal tracking-widest">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...history].reverse().map((r, i) => {
+                        const flickerHint = r.flickerBias > 0.1 ? "omega" : r.flickerBias < -0.1 ? "alpha" : null;
+                        return (
+                          <tr key={r.id} className={`border-b border-white/5 ${i === 0 ? "bg-neon-green/5" : "hover:bg-white/3"}`}>
+                            <td className="py-2.5 px-3 text-white/25">#{r.id}</td>
+                            <td className="py-2.5 px-3"><ReactorBadge reactor={r.winner} size="sm" /></td>
+                            <td className="py-2.5 px-3 text-white/50">{fmt(r.timestamp)}</td>
+                            <td className="py-2.5 px-3 text-yellow-400">{r.flickerRate.toFixed(1)}/с</td>
+                            <td className="py-2.5 px-3">
+                              <span className={r.flickerBias > 0 ? "text-cyan-400" : r.flickerBias < 0 ? "text-purple-400" : "text-white/30"}>
+                                {r.flickerBias > 0 ? `α +${(r.flickerBias * 100).toFixed(0)}%` : r.flickerBias < 0 ? `ω +${(Math.abs(r.flickerBias) * 100).toFixed(0)}%` : "нейтр."}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              {flickerHint ? (
+                                <ReactorBadge reactor={flickerHint as "alpha" | "omega"} size="sm" />
+                              ) : <span className="text-white/20">—</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
         {/* ── ПРЕДСКАЗАНИЕ ── */}
         {tab === "prediction" && (
           <div className="space-y-5 animate-fade-in-up">
-            <div className="grid sm:grid-cols-2 gap-5">
-              <SectionCard className="scan-line">
-                <SectionTitle icon="Zap" label="Следующее событие" />
-                <div className="flex items-center gap-6 mt-2">
-                  <div className="text-center">
-                    <p className="text-white/30 text-xs font-mono mb-2 tracking-widest">РЕАКТОР</p>
-                    <div className="w-20 h-20 rounded-xl bg-neon-green/10 border border-neon-green/30 flex items-center justify-center" style={{ boxShadow: "0 0 30px rgba(0,255,204,0.15)" }}>
-                      <span className="font-display text-2xl text-neon-green">{predictedReactor}</span>
-                    </div>
-                  </div>
-                  <Icon name="ArrowRight" size={24} className="text-white/20" />
-                  <div className="text-center">
-                    <p className="text-white/30 text-xs font-mono mb-2 tracking-widest">КОЛОНКА</p>
-                    <div className="w-20 h-20 rounded-xl bg-neon-purple/10 border border-neon-purple/30 flex items-center justify-center" style={{ boxShadow: "0 0 30px rgba(168,85,247,0.15)" }}>
-                      <span className="font-display text-4xl text-neon-purple">{predictedCol}</span>
-                    </div>
-                  </div>
-                </div>
-              </SectionCard>
-
-              <SectionCard>
-                <SectionTitle icon="Target" label="Уверенность модели" />
-                <div className="mt-2">
-                  <div className="flex items-end justify-between mb-3">
-                    <span className="font-display text-5xl text-neon-green" style={{ textShadow: "0 0 30px rgba(0,255,204,0.4)" }}>
-                      {Math.round(confidence * 100)}%
-                    </span>
-                    <span className="font-mono text-xs text-white/30">LSTM-v3</span>
-                  </div>
-                  <div className="h-3 rounded-full bg-white/5 overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all duration-700"
-                      style={{ width: `${confidence * 100}%`, background: "linear-gradient(90deg, #00ffcc, #a855f7)", boxShadow: "0 0 10px rgba(0,255,204,0.5)" }}
-                    />
-                  </div>
-                  <div className="flex justify-between mt-1.5">
-                    <span className="font-mono text-xs text-white/20">0%</span>
-                    <span className="font-mono text-xs text-white/20">100%</span>
-                  </div>
-                </div>
-              </SectionCard>
-            </div>
-
-            <SectionCard>
-              <SectionTitle icon="PieChart" label="Вероятность по колонкам" />
-              <div className="grid grid-cols-6 gap-2">
-                {COLUMNS.map((c) => {
-                  const isTarget = c === predictedCol;
-                  const normalized = isTarget ? confidence : (1 - confidence) / 5;
-                  return (
-                    <div key={c} className="text-center">
-                      <div className="h-24 flex flex-col justify-end mb-2">
-                        <div
-                          className="w-full rounded-t-md transition-all duration-700"
-                          style={{
-                            height: `${Math.max(6, normalized * 96)}px`,
-                            background: isTarget ? "linear-gradient(180deg, #00ffcc, #00ffcc33)" : "linear-gradient(180deg, rgba(168,85,247,0.5), rgba(168,85,247,0.1))",
-                            boxShadow: isTarget ? "0 0 20px rgba(0,255,204,0.4)" : "none",
-                          }}
-                        />
+            {!prediction || !prediction.reactor ? (
+              <div className="glass-card rounded-xl p-10 text-center">
+                <Icon name="Zap" size={36} className="text-white/10 mx-auto mb-3" />
+                <p className="font-mono text-sm text-white/30">Нужно минимум 2 раунда для предсказания</p>
+              </div>
+            ) : (
+              <>
+                <div className="grid sm:grid-cols-2 gap-5">
+                  {/* Предсказание */}
+                  <div
+                    className="rounded-xl p-6 border scan-line"
+                    style={{
+                      background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.07)" : "rgba(192,132,252,0.07)",
+                      borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.35)" : "rgba(192,132,252,0.35)",
+                    }}
+                  >
+                    <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-3">Следующий победитель</p>
+                    <div className="flex items-center gap-4">
+                      <div
+                        className="w-24 h-24 rounded-2xl flex items-center justify-center text-4xl font-display border"
+                        style={{
+                          background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.1)" : "rgba(192,132,252,0.1)",
+                          borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)",
+                          color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc",
+                          boxShadow: prediction.reactor === "alpha" ? "0 0 30px rgba(34,211,238,0.2)" : "0 0 30px rgba(192,132,252,0.2)",
+                        }}
+                      >
+                        {prediction.reactor === "alpha" ? "α" : "ω"}
                       </div>
-                      <p className={`font-display text-sm tracking-widest ${isTarget ? "text-neon-green" : "text-white/40"}`}>{c}</p>
-                      <p className={`font-mono text-xs mt-0.5 ${isTarget ? "text-neon-green" : "text-white/25"}`}>{Math.round(normalized * 100)}%</p>
+                      <div>
+                        <p className="font-display text-2xl tracking-widest" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {prediction.reactor === "alpha" ? "АЛЬФА" : "ОМЕГА"}
+                        </p>
+                        <p className="font-mono text-xs text-white/40 mt-1 max-w-xs">{prediction.reason}</p>
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
-            </SectionCard>
-
-            <SectionCard>
-              <SectionTitle icon="GitBranch" label="Последовательность (контекст предсказания)" />
-              <div className="flex items-center gap-2 flex-wrap">
-                {events.slice(-8).map((e, i, arr) => (
-                  <div key={e.id} className="flex items-center gap-2">
-                    <div className={`flex flex-col items-center gap-1 px-3 py-2 rounded-lg border transition-all ${i === arr.length - 1 ? "bg-neon-green/10 border-neon-green/30" : "bg-white/3 border-white/10"}`}>
-                      <span className={`font-mono text-xs ${i === arr.length - 1 ? "text-neon-blue" : "text-white/30"}`}>{e.reactor}</span>
-                      <span className={`font-display text-lg ${i === arr.length - 1 ? "text-neon-green" : "text-white/50"}`}>{e.column}</span>
-                    </div>
-                    {i < arr.length - 1 && <Icon name="ChevronRight" size={12} className="text-white/20" />}
                   </div>
-                ))}
-                <Icon name="ChevronRight" size={12} className="text-neon-green/50" />
-                <div className="flex flex-col items-center gap-1 px-3 py-2 rounded-lg border border-neon-green/50 bg-neon-green/5" style={{ borderStyle: "dashed" }}>
-                  <span className="font-mono text-xs text-neon-purple/70">{predictedReactor}</span>
-                  <span className="font-display text-lg text-neon-green animate-pulse">{predictedCol}</span>
+
+                  {/* Уверенность */}
+                  <div className="glass-card rounded-xl p-6">
+                    <p className="font-mono text-xs text-white/30 uppercase tracking-widest mb-3">Уверенность модели</p>
+                    <p className="font-display text-5xl text-neon-green mb-4" style={{ textShadow: "0 0 30px rgba(0,255,204,0.4)" }}>
+                      {Math.round(prediction.confidence * 100)}%
+                    </p>
+                    <ConfBar value={prediction.confidence} color="#00ffcc" />
+                    <div className="grid grid-cols-2 gap-3 mt-4">
+                      <div className="text-center p-2 rounded-lg bg-white/3">
+                        <p className="font-mono text-xs text-white/30 mb-1">Паттерн</p>
+                        <p className="font-mono text-xs text-neon-green">{prediction.patternMatch ? `${Math.round(prediction.patternMatch.confidence * 100)}%` : "нет"}</p>
+                      </div>
+                      <div className="text-center p-2 rounded-lg bg-white/3">
+                        <p className="font-mono text-xs text-white/30 mb-1">Мерцание</p>
+                        <p className="font-mono text-xs text-yellow-400">{prediction.flickerHint ? `${Math.round(prediction.flickerWeight * 100)}%` : "нет"}</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </SectionCard>
+
+                {/* Паттерн */}
+                {prediction.patternMatch && (
+                  <div className="glass-card rounded-xl p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Icon name="GitBranch" size={14} className="text-neon-green" />
+                      <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Совпавший паттерн</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {prediction.patternMatch.sequence.map((r, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <div
+                            className="px-3 py-2 rounded-lg border text-center min-w-16"
+                            style={{
+                              background: r === "alpha" ? "rgba(34,211,238,0.1)" : "rgba(192,132,252,0.1)",
+                              borderColor: r === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
+                            }}
+                          >
+                            <span className="font-display text-lg" style={{ color: r === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                              {r === "alpha" ? "α" : "ω"}
+                            </span>
+                          </div>
+                          {i < prediction.patternMatch!.sequence.length - 1 && (
+                            <Icon name="ArrowRight" size={12} className="text-white/20" />
+                          )}
+                        </div>
+                      ))}
+                      <Icon name="ArrowRight" size={14} className="text-neon-green/60" />
+                      <div
+                        className="px-3 py-2 rounded-lg border text-center min-w-16 animate-pulse"
+                        style={{
+                          background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.15)" : "rgba(192,132,252,0.15)",
+                          borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.5)" : "rgba(192,132,252,0.5)",
+                        }}
+                      >
+                        <span className="font-display text-lg" style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {prediction.reactor === "alpha" ? "α" : "ω"}
+                        </span>
+                      </div>
+                      <span className="font-mono text-xs text-white/30 ml-2">встречалось {prediction.patternMatch.count}×</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Последние раунды */}
+                <div className="glass-card rounded-xl p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Icon name="History" size={14} className="text-neon-green" />
+                    <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Последние раунды (контекст)</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {history.slice(-10).map((r, i, arr) => (
+                      <div key={r.id} className="flex items-center gap-2">
+                        <div
+                          className="flex flex-col items-center px-2 py-1.5 rounded-lg border text-xs"
+                          style={{
+                            background: r.winner === "alpha" ? "rgba(34,211,238,0.08)" : "rgba(192,132,252,0.08)",
+                            borderColor: r.winner === "alpha" ? "rgba(34,211,238,0.25)" : "rgba(192,132,252,0.25)",
+                          }}
+                        >
+                          <span style={{ color: r.winner === "alpha" ? "#22d3ee" : "#c084fc" }} className="font-display text-base">
+                            {r.winner === "alpha" ? "α" : "ω"}
+                          </span>
+                          <span className="text-white/20 font-mono" style={{ fontSize: 9 }}>#{r.id}</span>
+                        </div>
+                        {i < arr.length - 1 && <Icon name="ChevronRight" size={10} className="text-white/15" />}
+                      </div>
+                    ))}
+                    <Icon name="ChevronRight" size={12} className="text-neon-green/40" />
+                    <div
+                      className="px-2 py-1.5 rounded-lg border text-xs animate-pulse"
+                      style={{
+                        borderStyle: "dashed",
+                        borderColor: prediction.reactor === "alpha" ? "rgba(34,211,238,0.5)" : "rgba(192,132,252,0.5)",
+                        background: prediction.reactor === "alpha" ? "rgba(34,211,238,0.08)" : "rgba(192,132,252,0.08)",
+                      }}
+                    >
+                      <span style={{ color: prediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }} className="font-display text-base">
+                        {prediction.reactor === "alpha" ? "α" : "ω"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
         {/* ── СТАТИСТИКА ── */}
         {tab === "stats" && (
           <div className="space-y-5 animate-fade-in-up">
+            {/* Частота */}
             <div className="grid sm:grid-cols-2 gap-5">
-              <SectionCard>
-                <SectionTitle icon="BarChart2" label="Частота по колонкам" />
-                <div className="space-y-2.5">
-                  {COLUMNS.map((c) => {
-                    const pct = Math.round((colCounts[c] / totalEvents) * 100);
-                    return (
-                      <div key={c} className="flex items-center gap-3">
-                        <span className="font-display text-sm text-white/60 w-5">{c}</span>
-                        <div className="flex-1 h-6 bg-white/5 rounded-md overflow-hidden">
-                          <div
-                            className="h-full rounded-md transition-all duration-700 flex items-center px-2"
-                            style={{
-                              width: `${Math.max(5, pct)}%`,
-                              background: c === activeColumn ? "linear-gradient(90deg, #00ffcc, #00ffcc88)" : "linear-gradient(90deg, rgba(168,85,247,0.6), rgba(168,85,247,0.3))",
-                            }}
-                          >
-                            {pct > 10 && <span className="font-mono text-xs text-[#080d14] font-bold">{pct}%</span>}
-                          </div>
-                        </div>
-                        <span className="font-mono text-xs text-white/30 w-8 text-right">{colCounts[c]}</span>
-                      </div>
-                    );
-                  })}
+              <div className="glass-card rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icon name="BarChart2" size={14} className="text-neon-green" />
+                  <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Распределение побед</span>
                 </div>
-              </SectionCard>
+                <div className="space-y-4">
+                  {[
+                    { label: "α Альфа", wins: alphaWins, color: "#22d3ee" },
+                    { label: "ω Омега", wins: omegaWins, color: "#c084fc" },
+                  ].map(r => (
+                    <div key={r.label}>
+                      <div className="flex justify-between mb-1.5">
+                        <span className="font-mono text-sm" style={{ color: r.color }}>{r.label}</span>
+                        <span className="font-mono text-sm text-white/60">{r.wins} раундов · {totalRounds ? Math.round(r.wins / totalRounds * 100) : 0}%</span>
+                      </div>
+                      <ConfBar value={totalRounds ? r.wins / totalRounds : 0} color={r.color} />
+                    </div>
+                  ))}
+                </div>
+                {totalRounds > 0 && (
+                  <div className="mt-4 h-6 rounded-full overflow-hidden flex">
+                    <div style={{ width: `${alphaWins / totalRounds * 100}%`, background: "#22d3ee55" }} />
+                    <div style={{ flex: 1, background: "#c084fc55" }} />
+                  </div>
+                )}
+              </div>
 
-              <SectionCard>
-                <SectionTitle icon="Activity" label="Активность реакторов %" />
-                <div className="space-y-2.5">
-                  {REACTORS.map((r) => {
-                    const pct = Math.round((reactorCounts[r] / totalEvents) * 100);
-                    return (
-                      <div key={r} className="flex items-center gap-3">
-                        <span className="font-mono text-xs text-white/40 w-10">{r}</span>
-                        <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden">
-                          <div
-                            className="h-full rounded transition-all duration-700"
-                            style={{
-                              width: `${Math.max(4, pct)}%`,
-                              background: r === activeReactor ? "linear-gradient(90deg, #00ffcc, #38bdf8)" : "linear-gradient(90deg, rgba(56,189,248,0.5), rgba(56,189,248,0.2))",
-                              boxShadow: r === activeReactor ? "0 0 8px rgba(0,255,204,0.4)" : "none",
-                            }}
-                          />
-                        </div>
-                        <span className="font-mono text-xs text-white/30 w-8 text-right">{pct}%</span>
-                      </div>
-                    );
-                  })}
+              {/* Мерцание по раундам */}
+              <div className="glass-card rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icon name="Zap" size={14} className="text-yellow-400" />
+                  <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Анализ мерцания по раундам</span>
                 </div>
-              </SectionCard>
+                {history.length === 0 ? (
+                  <p className="font-mono text-xs text-white/25 text-center py-6">Нет данных</p>
+                ) : (
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {[...history].reverse().slice(0, 15).map(r => (
+                      <div key={r.id} className="flex items-center gap-2 text-xs font-mono">
+                        <span className="text-white/25 w-8">#{r.id}</span>
+                        <ReactorBadge reactor={r.winner} size="sm" />
+                        <div className="flex-1 h-4 rounded bg-white/5 overflow-hidden flex">
+                          <div style={{ width: `${r.flickerBias > 0 ? r.flickerBias * 100 : 0}%`, background: "#22d3ee55" }} />
+                          <div style={{ width: `${r.flickerBias < 0 ? Math.abs(r.flickerBias) * 100 : 0}%`, background: "#c084fc55" }} />
+                        </div>
+                        <span className="text-yellow-400 w-12 text-right">{r.flickerRate.toFixed(1)}/с</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
-            <SectionCard>
-              <SectionTitle icon="GitMerge" label="Найденные паттерны последовательностей" />
-              <div className="grid sm:grid-cols-2 gap-3">
-                {PATTERNS.map((p, i) => (
-                  <div key={i} className="glass-card-purple rounded-lg p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="font-mono text-xs text-white/40">{p.label}</span>
-                      <span className="font-mono text-xs text-neon-purple">{Math.round(p.confidence * 100)}% conf</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 mb-3">
-                      {p.seq.map((s, j) => (
-                        <div key={j} className="flex items-center gap-1.5">
-                          <span className="w-7 h-7 flex items-center justify-center rounded bg-neon-purple/15 border border-neon-purple/25 font-display text-sm text-neon-purple">{s}</span>
-                          {j < p.seq.length - 1 && <Icon name="ArrowRight" size={10} className="text-white/20" />}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="h-1.5 rounded-full bg-white/5">
-                      <div className="h-full rounded-full" style={{ width: `${p.confidence * 100}%`, background: "linear-gradient(90deg, #a855f7, #38bdf8)" }} />
-                    </div>
-                    <p className="font-mono text-xs text-white/25 mt-2">встречается {p.count} раз</p>
-                  </div>
-                ))}
+            {/* Паттерны */}
+            <div className="glass-card rounded-xl p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Icon name="GitMerge" size={14} className="text-neon-green" />
+                <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Найденные паттерны последовательностей</span>
               </div>
-            </SectionCard>
+              {patterns.length === 0 ? (
+                <p className="font-mono text-xs text-white/25 text-center py-6">Нужно больше раундов для поиска паттернов</p>
+              ) : (
+                <div className="grid sm:grid-cols-2 gap-3">
+                  {patterns.map((p, i) => (
+                    <div key={i} className="glass-card-purple rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="font-mono text-xs text-white/40">{p.label}</span>
+                        <span className="font-mono text-xs text-purple-400">{Math.round(p.confidence * 100)}%</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                        {p.sequence.map((r, j) => (
+                          <div key={j} className="flex items-center gap-1">
+                            <span
+                              className="w-7 h-7 flex items-center justify-center rounded font-display text-sm border"
+                              style={{
+                                background: r === "alpha" ? "rgba(34,211,238,0.12)" : "rgba(192,132,252,0.12)",
+                                borderColor: r === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)",
+                                color: r === "alpha" ? "#22d3ee" : "#c084fc",
+                              }}
+                            >{r === "alpha" ? "α" : "ω"}</span>
+                            {j < p.sequence.length - 1 && <Icon name="ArrowRight" size={8} className="text-white/20" />}
+                          </div>
+                        ))}
+                        <Icon name="ArrowRight" size={10} className="text-neon-green/40" />
+                        <span
+                          className="w-7 h-7 flex items-center justify-center rounded font-display text-sm border font-bold"
+                          style={{
+                            background: p.next === "alpha" ? "rgba(34,211,238,0.2)" : "rgba(192,132,252,0.2)",
+                            borderColor: p.next === "alpha" ? "#22d3ee" : "#c084fc",
+                            color: p.next === "alpha" ? "#22d3ee" : "#c084fc",
+                          }}
+                        >{p.next === "alpha" ? "α" : "ω"}</span>
+                      </div>
+                      <ConfBar value={p.confidence} color={p.next === "alpha" ? "#22d3ee" : "#c084fc"} />
+                      <p className="font-mono text-xs text-white/20 mt-1.5">встречается {p.count}×</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
-            <SectionCard>
-              <SectionTitle icon="Flame" label="Тепловая карта активности (последние 50 событий)" />
-              <div className="flex flex-wrap gap-1">
-                {events.slice(-50).map((e, i) => {
-                  const intensity = (i + 1) / 50;
-                  return (
+            {/* Тепловая карта */}
+            {history.length > 0 && (
+              <div className="glass-card rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icon name="Flame" size={14} className="text-orange-400" />
+                  <span className="font-display text-xs tracking-widest text-orange-400/80 uppercase">Хронология раундов</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {history.map((r, i) => (
                     <div
-                      key={e.id}
-                      title={`${e.reactor} / ${e.column} — ${fmt(e.timestamp)}`}
-                      className="w-6 h-6 rounded-sm cursor-default transition-all hover:scale-110"
+                      key={r.id}
+                      title={`#${r.id}: ${r.winner === "alpha" ? "Альфа" : "Омега"} · ${fmt(r.timestamp)}`}
+                      className="w-7 h-7 rounded-md flex items-center justify-center cursor-default transition-transform hover:scale-110 font-display text-xs"
                       style={{
-                        background: `rgba(0, 255, 204, ${0.08 + intensity * 0.55})`,
-                        border: `1px solid rgba(0, 255, 204, ${0.08 + intensity * 0.28})`,
+                        background: r.winner === "alpha" ? `rgba(34,211,238,${0.2 + (i / history.length) * 0.5})` : `rgba(192,132,252,${0.2 + (i / history.length) * 0.5})`,
+                        border: `1px solid ${r.winner === "alpha" ? "rgba(34,211,238,0.3)" : "rgba(192,132,252,0.3)"}`,
+                        color: r.winner === "alpha" ? "#22d3ee" : "#c084fc",
                       }}
-                    />
-                  );
-                })}
+                    >
+                      {r.winner === "alpha" ? "α" : "ω"}
+                    </div>
+                  ))}
+                </div>
               </div>
-              <p className="font-mono text-xs text-white/20 mt-3">Наведи на ячейку для деталей · слева → давнее, справа → новее</p>
-            </SectionCard>
+            )}
           </div>
         )}
 
@@ -548,105 +803,84 @@ export default function Index() {
           <div className="space-y-5 animate-fade-in-up">
             <div className="grid sm:grid-cols-3 gap-4">
               {[
-                { label: "Тип модели", value: "LSTM", sub: "Long Short-Term Memory", color: "text-neon-green", icon: "Cpu" },
-                { label: "Точность", value: "87.4%", sub: "на тестовой выборке", color: "text-neon-blue", icon: "Target" },
-                { label: "Обновление", value: "real-time", sub: "скользящее окно 50 evt", color: "text-neon-purple", icon: "RefreshCw" },
-              ].map((s) => (
-                <SectionCard key={s.label} className="text-center">
-                  <Icon name={s.icon} size={22} className={`${s.color} mx-auto mb-3`} />
+                { label: "Алгоритм", value: "Markov", sub: "+ Flicker Analysis", color: "text-neon-green", icon: "Cpu" },
+                { label: "Окно паттернов", value: "2–5", sub: "последних раундов", color: "text-cyan-400", icon: "GitBranch" },
+                { label: "Раундов обработано", value: totalRounds, sub: "из захвата экрана", color: "text-purple-400", icon: "Database" },
+              ].map(s => (
+                <div key={s.label} className="glass-card rounded-xl p-5 text-center">
+                  <Icon name={s.icon} size={20} className={`${s.color} mx-auto mb-3`} />
                   <p className={`font-display text-2xl ${s.color} mb-1`}>{s.value}</p>
                   <p className="text-white/40 text-xs font-mono">{s.label}</p>
-                  <p className="text-white/25 text-xs mt-1">{s.sub}</p>
-                </SectionCard>
+                  <p className="text-white/25 text-xs mt-0.5">{s.sub}</p>
+                </div>
               ))}
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-5">
-              <SectionCard>
-                <SectionTitle icon="Settings" label="Параметры обучения" />
-                <div className="space-y-3 font-mono text-sm">
-                  {[
-                    ["Длина последовательности", "8 событий"],
-                    ["Размер скрытого слоя", "128 нейронов"],
-                    ["Dropout", "0.2"],
-                    ["Learning rate", "0.001"],
-                    ["Batch size", "32"],
-                    ["Эпох обучения", "200"],
-                    ["Оптимизатор", "Adam"],
-                    ["Loss function", "Cross-entropy"],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex items-center justify-between border-b border-white/5 pb-2">
-                      <span className="text-white/40 text-xs">{k}</span>
-                      <span className="text-neon-green text-xs font-bold">{v}</span>
-                    </div>
-                  ))}
-                </div>
-              </SectionCard>
-
-              <div className="space-y-4">
-                <SectionCard>
-                  <SectionTitle icon="TrendingUp" label="Метрики качества" />
-                  <div className="space-y-3">
-                    {[
-                      { label: "Top-1 Accuracy", val: 0.874, color: "#00ffcc" },
-                      { label: "Top-3 Accuracy", val: 0.961, color: "#38bdf8" },
-                      { label: "F1-score", val: 0.851, color: "#a855f7" },
-                      { label: "AUC-ROC", val: 0.923, color: "#fb923c" },
-                    ].map((m) => (
-                      <div key={m.label}>
-                        <div className="flex justify-between mb-1">
-                          <span className="font-mono text-xs text-white/40">{m.label}</span>
-                          <span className="font-mono text-xs font-bold" style={{ color: m.color }}>{Math.round(m.val * 100)}%</span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-white/5">
-                          <div className="h-full rounded-full" style={{ width: `${m.val * 100}%`, background: m.color, boxShadow: `0 0 6px ${m.color}66` }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </SectionCard>
-
-                <SectionCard>
-                  <SectionTitle icon="Lightbulb" label="Найденные закономерности" />
-                  <ul className="space-y-2">
-                    {[
-                      "Циклическая ротация A→B→C встречается в 23% цепочек",
-                      "R-03 имеет повышенную активность в 18:00–22:00",
-                      "Колонка D часто следует за F с вероятностью 41%",
-                      "Медианный интервал между событиями: 4.2 сек",
-                    ].map((insight, i) => (
-                      <li key={i} className="flex items-start gap-2 text-xs text-white/50 font-mono">
-                        <span className="text-neon-green mt-0.5 flex-shrink-0">◆</span>
-                        <span>{insight}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </SectionCard>
+            <div className="glass-card rounded-xl p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Icon name="Settings" size={14} className="text-neon-green" />
+                <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">Как работает предсказание</span>
               </div>
-            </div>
-
-            <SectionCard>
-              <SectionTitle icon="Network" label="Архитектура нейросети" />
-              <div className="flex items-center gap-3 overflow-x-auto py-2">
+              <div className="space-y-4">
                 {[
-                  { label: "INPUT", sub: "seq × 2 features", color: "#38bdf8" },
-                  { label: "EMBED", sub: "dim=32", color: "#38bdf8" },
-                  { label: "LSTM", sub: "128 units", color: "#00ffcc" },
-                  { label: "LSTM", sub: "64 units", color: "#00ffcc" },
-                  { label: "DROPOUT", sub: "p=0.2", color: "#facc15" },
-                  { label: "DENSE", sub: "32 units, ReLU", color: "#a855f7" },
-                  { label: "OUTPUT", sub: `${COLUMNS.length} classes`, color: "#f43f5e" },
-                ].map((layer, i, arr) => (
-                  <div key={i} className="flex items-center gap-2 flex-shrink-0">
-                    <div className="text-center px-3 py-2 rounded-lg border" style={{ borderColor: `${layer.color}44`, background: `${layer.color}0d` }}>
-                      <p className="font-display text-xs tracking-widest" style={{ color: layer.color }}>{layer.label}</p>
-                      <p className="font-mono text-xs text-white/30 mt-0.5 whitespace-nowrap">{layer.sub}</p>
+                  {
+                    step: "01", title: "Захват и анализ пикселей",
+                    desc: "Каждые ~100мс программа анализирует левую (Альфа) и правую (Омега) половины захваченного окна. Считает долю жёлтых пикселей (R>180, G>160, B<80).",
+                    color: "#00ffcc",
+                  },
+                  {
+                    step: "02", title: "Детекция мерцания",
+                    desc: "Когда жёлтый сигнал превышает порог 4% — фиксируется мерцание. Записывается: какая сторона мерцает, как часто меняются стороны (темп), смещение (α vs ω).",
+                    color: "#facc15",
+                  },
+                  {
+                    step: "03", title: "Детекция результата",
+                    desc: "При превышении порога 8% жёлтого — фиксируется SUCCESS. Победитель = та сторона, у которой жёлтого больше. Раунд записывается в историю.",
+                    color: "#38bdf8",
+                  },
+                  {
+                    step: "04", title: "Поиск паттернов (Марков)",
+                    desc: "Ищутся цепочки длиной 2–5 раундов в истории. Для каждой цепочки считается вероятность следующего исхода. Выбирается самый уверенный совпавший паттерн.",
+                    color: "#a855f7",
+                  },
+                  {
+                    step: "05", title: "Взвешивание с мерцанием",
+                    desc: "Смещение мерцания добавляет/убирает вес к паттерну. Логика: та сторона, которая мерцала МЕНЬШЕ — чаще побеждает. Вес мерцания: до 40% от уверенности.",
+                    color: "#fb923c",
+                  },
+                ].map(s => (
+                  <div key={s.step} className="flex gap-4">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 font-display text-xs" style={{ background: `${s.color}15`, border: `1px solid ${s.color}30`, color: s.color }}>
+                      {s.step}
                     </div>
-                    {i < arr.length - 1 && <Icon name="ArrowRight" size={14} className="text-white/20" />}
+                    <div>
+                      <p className="font-display text-sm tracking-wide text-white/80 mb-1">{s.title}</p>
+                      <p className="font-mono text-xs text-white/40 leading-relaxed">{s.desc}</p>
+                    </div>
                   </div>
                 ))}
               </div>
-            </SectionCard>
+            </div>
+
+            <div className="glass-card rounded-xl p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Icon name="Lightbulb" size={14} className="text-yellow-400" />
+                <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Важные замечания</span>
+              </div>
+              <ul className="space-y-2">
+                {[
+                  "Анализ пикселей работает только если область захвата содержит именно две колонки реакторов без лишних элементов",
+                  "Чем больше раундов — тем точнее паттерны. Рекомендуется минимум 10 раундов перед использованием предсказаний",
+                  "Темп мерцания влияет на результат: быстрое хаотичное мерцание может снижать уверенность предсказания",
+                  "Алгоритм не гарантирует правильность — он ищет статистические закономерности в уже случившихся раундах",
+                ].map((t, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-white/45 font-mono">
+                    <span className="text-yellow-400 mt-0.5 flex-shrink-0">◆</span>
+                    <span>{t}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         )}
       </main>
