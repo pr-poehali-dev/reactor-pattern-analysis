@@ -196,19 +196,34 @@ export default function Index() {
       const now = frame.timestamp;
       const prevPhase = phaseRef.current;
 
-      // Мерцание — собираем сэмплы за последние 6 сек
+      // Мерцание — собираем сэмплы с учётом смены доминирующей стороны
       if (frame.phase === "flicker" || frame.phase === "result") {
         if (phaseRef.current === "idle") {
           phaseRef.current = "flicker";
           setRoundPhase("flicker");
         }
-        const dominant = frame.alphaYellow >= frame.omegaYellow ? "alpha" : "omega";
-        flickerBufRef.current.push({ timestamp: now, dominant });
-        flickerBufRef.current = flickerBufRef.current.filter(s => now - s.timestamp < 6000);
+
+        // Фиксируем смену доминирующей стороны
+        const prevBuf = flickerBufRef.current;
+        const lastDom = prevBuf.length > 0 ? prevBuf[prevBuf.length - 1].dominant : null;
+        const switchEvent = frame.dominant !== null && lastDom !== null && frame.dominant !== lastDom;
+
+        if (frame.dominant !== null) {
+          flickerBufRef.current.push({
+            timestamp: now,
+            dominant: frame.dominant,
+            alphaLevel: frame.alphaSmooth,
+            omegaLevel: frame.omegaSmooth,
+            switchEvent,
+          });
+        }
+
+        // Держим окно 8 секунд для полного анализа мерцания
+        flickerBufRef.current = flickerBufRef.current.filter(s => now - s.timestamp < 8000);
         setFlickerSamples([...flickerBufRef.current]);
       }
 
-      // Резкий скачок = победитель зафиксирован, кулдаун EVENT_COOLDOWN_MS
+      // Резкий скачок = победитель зафиксирован
       if (frame.phase === "result" && frame.winner && now - lastResultTsRef.current > EVENT_COOLDOWN_MS) {
         lastResultTsRef.current = now;
         phaseRef.current = "result";
@@ -217,7 +232,6 @@ export default function Index() {
         const flickerStats = computeFlickerStats(flickerBufRef.current);
 
         setHistory(prev => {
-          // Берём прогноз который был ДО этого раунда
           const prevPred = predict(prev, flickerStats.bias, flickerStats.rate);
           const predictedBefore = prevPred.reactor;
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
@@ -229,6 +243,7 @@ export default function Index() {
             flickerPattern: [...flickerBufRef.current],
             flickerRate: flickerStats.rate,
             flickerBias: flickerStats.bias,
+            lastFlickerDominant: flickerStats.lastDominant,
             predictedBefore,
             predictionHit,
           };
@@ -646,41 +661,71 @@ export default function Index() {
 
             {/* Мерцание в реальном времени */}
             {roundPhase === "flicker" && flickerSamples.length > 0 && (
-              <div className="glass-card rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-4">
-                  <Icon name="Zap" size={14} className="text-yellow-400" />
-                  <span className="font-display text-xs tracking-widest text-yellow-400 uppercase">Анализ мерцания (live)</span>
-                </div>
-                <div className="grid grid-cols-3 gap-4 mb-4">
-                  <div className="text-center">
-                    <p className="font-mono text-xs text-white/30 mb-1">Темп</p>
-                    <p className="font-display text-xl text-yellow-400">{flickerStats.rate.toFixed(1)}<span className="text-xs text-white/30 ml-1">/сек</span></p>
+              <div className="glass-card rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Icon name="Zap" size={13} className="text-yellow-400" />
+                    <span className="font-display text-xs tracking-widest text-yellow-400 uppercase">Мерцание (live)</span>
                   </div>
-                  <div className="text-center">
-                    <p className="font-mono text-xs text-white/30 mb-1">Альфа %</p>
-                    <p className="font-display text-xl text-cyan-400">{Math.round(flickerStats.alphaPct * 100)}%</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="font-mono text-xs text-white/30 mb-1">Омега %</p>
-                    <p className="font-display text-xl text-purple-400">{Math.round(flickerStats.omegaPct * 100)}%</p>
-                  </div>
-                </div>
-                {/* Визуализация последних сэмплов */}
-                <div className="flex gap-1 flex-wrap">
-                  {flickerSamples.slice(-30).map((s, i) => (
-                    <div
-                      key={i}
-                      className="w-4 h-6 rounded-sm transition-all"
+                  {/* Кто мерцает сейчас */}
+                  {flickerStats.lastDominant && (
+                    <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-mono"
                       style={{
-                        background: s.dominant === "alpha" ? "rgba(34,211,238,0.7)" : "rgba(192,132,252,0.7)",
-                        boxShadow: s.dominant === "alpha" ? "0 0 4px #22d3ee" : "0 0 4px #c084fc",
+                        background: flickerStats.lastDominant === "alpha" ? "rgba(34,211,238,0.15)" : "rgba(192,132,252,0.15)",
+                        border: `1px solid ${flickerStats.lastDominant === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)"}`,
+                        color: flickerStats.lastDominant === "alpha" ? "#22d3ee" : "#c084fc",
                       }}
-                    />
-                  ))}
+                    >
+                      <span className="animate-pulse">●</span>
+                      {flickerStats.lastDominant === "alpha" ? "α Альфа" : "ω Омега"}
+                    </div>
+                  )}
+                </div>
+
+                {/* Метрики */}
+                <div className="grid grid-cols-4 gap-2 mb-3">
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">Темп</p>
+                    <p className="font-display text-lg text-yellow-400">{flickerStats.rate.toFixed(1)}<span className="text-xs text-white/30">/с</span></p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">Переключений</p>
+                    <p className="font-display text-lg text-white/70">{flickerStats.switchCount}</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">α %</p>
+                    <p className="font-display text-lg text-cyan-400">{Math.round(flickerStats.alphaPct * 100)}%</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">ω %</p>
+                    <p className="font-display text-lg text-purple-400">{Math.round(flickerStats.omegaPct * 100)}%</p>
+                  </div>
+                </div>
+
+                {/* Визуализация смен — каждый столбик = кадр, высота = уровень сигнала */}
+                <div className="flex gap-px items-end" style={{ height: 36 }}>
+                  {flickerSamples.slice(-50).map((s, i, arr) => {
+                    const level = Math.max(s.alphaLevel, s.omegaLevel);
+                    const h = Math.max(4, Math.min(36, level * 800));
+                    const isSwitch = s.switchEvent;
+                    return (
+                      <div
+                        key={i}
+                        className="flex-1 rounded-sm transition-all"
+                        style={{
+                          height: h,
+                          background: s.dominant === "alpha" ? "rgba(34,211,238,0.8)" : "rgba(192,132,252,0.8)",
+                          boxShadow: isSwitch ? `0 0 6px ${s.dominant === "alpha" ? "#22d3ee" : "#c084fc"}` : "none",
+                          opacity: 0.4 + (i / arr.length) * 0.6,
+                          outline: isSwitch ? `1px solid ${s.dominant === "alpha" ? "#22d3ee" : "#c084fc"}` : "none",
+                        }}
+                      />
+                    );
+                  })}
                 </div>
                 <div className="flex justify-between mt-1">
-                  <span className="font-mono text-xs text-white/20">← раньше</span>
-                  <span className="font-mono text-xs text-yellow-400">сейчас →</span>
+                  <span className="font-mono text-xs text-white/15">← 8 сек назад</span>
+                  <span className="font-mono text-xs text-yellow-400/60">сейчас →</span>
                 </div>
               </div>
             )}
