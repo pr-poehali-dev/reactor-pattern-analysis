@@ -661,119 +661,72 @@ export default function Index() {
 
             {/* Мерцание в реальном времени */}
             {capturing && (
-              <div className="glass-card rounded-xl p-4 space-y-3">
-
-                {/* Заголовок + кто сейчас */}
-                <div className="flex items-center justify-between">
+              <div className="glass-card rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Icon name="Zap" size={13} className="text-yellow-400" />
-                    <span className="font-display text-xs tracking-widest text-yellow-400 uppercase">Мерцание α↔ω</span>
+                    <span className="font-display text-xs tracking-widest text-yellow-400 uppercase">Мерцание (live)</span>
                   </div>
-                  {lastFrame && (
-                    <div className="flex items-center gap-1 font-mono text-xs text-white/30">
-                      <span style={{ color: "#22d3ee" }}>{(lastFrame.alphaSmooth * 1000).toFixed(1)}</span>
-                      <span className="text-white/20">vs</span>
-                      <span style={{ color: "#c084fc" }}>{(lastFrame.omegaSmooth * 1000).toFixed(1)}</span>
-                      <span className="text-white/20 ml-1">×10⁻³</span>
+                  {/* Кто мерцает сейчас */}
+                  {flickerStats.lastDominant && (
+                    <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-mono"
+                      style={{
+                        background: flickerStats.lastDominant === "alpha" ? "rgba(34,211,238,0.15)" : "rgba(192,132,252,0.15)",
+                        border: `1px solid ${flickerStats.lastDominant === "alpha" ? "rgba(34,211,238,0.4)" : "rgba(192,132,252,0.4)"}`,
+                        color: flickerStats.lastDominant === "alpha" ? "#22d3ee" : "#c084fc",
+                      }}
+                    >
+                      <span className="animate-pulse">●</span>
+                      {flickerStats.lastDominant === "alpha" ? "α Альфа" : "ω Омега"}
                     </div>
                   )}
                 </div>
 
-                {/* Большой индикатор темпа переключения */}
-                <div className="flex items-center gap-3">
-                  {/* α сторона */}
-                  <div className="text-center flex-shrink-0 w-12">
-                    <div className="font-display text-xl text-cyan-400"
-                      style={{ opacity: flickerStats.lastDominant === "alpha" ? 1 : 0.3, transition: "opacity 0.2s" }}>
-                      α
-                    </div>
-                    <div className="font-mono text-xs text-cyan-400/60">{Math.round(flickerStats.alphaPct * 100)}%</div>
+                {/* Метрики */}
+                <div className="grid grid-cols-4 gap-2 mb-3">
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">Темп</p>
+                    <p className="font-display text-lg text-yellow-400">{flickerStats.rate.toFixed(1)}<span className="text-xs text-white/30">/с</span></p>
                   </div>
-
-                  {/* Центральная шкала темпа */}
-                  <div className="flex-1">
-                    <div className="relative">
-                      {/* Шкала скорости */}
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="font-mono text-white/20" style={{ fontSize: 9 }}>медленно</span>
-                        <span className="font-display text-sm text-yellow-400 font-bold">
-                          {flickerStats.rate.toFixed(2)}<span className="text-xs text-white/30 ml-0.5">/с</span>
-                        </span>
-                        <span className="font-mono text-white/20" style={{ fontSize: 9 }}>быстро</span>
-                      </div>
-                      {/* Полоса темпа */}
-                      <div className="h-2 rounded-full bg-white/5 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-300"
-                          style={{
-                            width: `${Math.min(flickerStats.rate / 6 * 100, 100)}%`,
-                            background: flickerStats.rate < 1 ? "#64748b"
-                              : flickerStats.rate < 2 ? "#facc15"
-                              : flickerStats.rate < 4 ? "#fb923c"
-                              : "#f43f5e",
-                            boxShadow: flickerStats.rate > 2 ? "0 0 8px currentColor" : "none",
-                          }}
-                        />
-                      </div>
-                      {/* Число переключений */}
-                      <div className="flex items-center justify-between mt-1">
-                        <span className="font-mono text-white/20" style={{ fontSize: 9 }}>переключений: {flickerStats.switchCount}</span>
-                        <span className="font-mono text-white/20" style={{ fontSize: 9 }}>
-                          {flickerStats.rate < 1 ? "тихо" : flickerStats.rate < 2 ? "умеренно" : flickerStats.rate < 4 ? "активно" : "очень быстро"}
-                        </span>
-                      </div>
-                    </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">Переключений</p>
+                    <p className="font-display text-lg text-white/70">{flickerStats.switchCount}</p>
                   </div>
-
-                  {/* ω сторона */}
-                  <div className="text-center flex-shrink-0 w-12">
-                    <div className="font-display text-xl text-purple-400"
-                      style={{ opacity: flickerStats.lastDominant === "omega" ? 1 : 0.3, transition: "opacity 0.2s" }}>
-                      ω
-                    </div>
-                    <div className="font-mono text-xs text-purple-400/60">{Math.round(flickerStats.omegaPct * 100)}%</div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">α %</p>
+                    <p className="font-display text-lg text-cyan-400">{Math.round(flickerStats.alphaPct * 100)}%</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-mono text-xs text-white/30 mb-0.5">ω %</p>
+                    <p className="font-display text-lg text-purple-400">{Math.round(flickerStats.omegaPct * 100)}%</p>
                   </div>
                 </div>
 
-                {/* Визуализация сэмплов — кто когда мерцал */}
-                <div>
-                  <div className="flex gap-px items-end" style={{ height: 32 }}>
-                    {/* Пустые слоты если данных мало */}
-                    {flickerSamples.length === 0 && (
-                      <div className="flex-1 flex items-center justify-center">
-                        <span className="font-mono text-white/15" style={{ fontSize: 10 }}>ожидание сигнала...</span>
-                      </div>
-                    )}
-                    {flickerSamples.slice(-60).map((s, i, arr) => {
-                      const level = Math.max(s.alphaLevel, s.omegaLevel);
-                      const h = Math.max(3, Math.min(32, level * 1200));
-                      return (
-                        <div
-                          key={i}
-                          className="flex-1 rounded-sm"
-                          style={{
-                            height: h,
-                            background: s.dominant === "alpha" ? "#22d3ee" : "#c084fc",
-                            opacity: 0.3 + (i / arr.length) * 0.7,
-                            boxShadow: s.switchEvent ? `0 0 4px ${s.dominant === "alpha" ? "#22d3ee" : "#c084fc"}` : "none",
-                          }}
-                        />
-                      );
-                    })}
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span className="font-mono text-white/15" style={{ fontSize: 9 }}>← 8 сек</span>
-                    <div className="flex items-center gap-2">
-                      <span className="flex items-center gap-1 font-mono text-white/20" style={{ fontSize: 9 }}>
-                        <span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#22d3ee" }} />α
-                      </span>
-                      <span className="flex items-center gap-1 font-mono text-white/20" style={{ fontSize: 9 }}>
-                        <span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#c084fc" }} />ω
-                      </span>
-                    </div>
-                    <span className="font-mono text-yellow-400/40" style={{ fontSize: 9 }}>сейчас →</span>
-                  </div>
+                {/* Визуализация смен — каждый столбик = кадр, высота = уровень сигнала */}
+                <div className="flex gap-px items-end" style={{ height: 36 }}>
+                  {flickerSamples.slice(-50).map((s, i, arr) => {
+                    const level = Math.max(s.alphaLevel, s.omegaLevel);
+                    const h = Math.max(4, Math.min(36, level * 800));
+                    const isSwitch = s.switchEvent;
+                    return (
+                      <div
+                        key={i}
+                        className="flex-1 rounded-sm transition-all"
+                        style={{
+                          height: h,
+                          background: s.dominant === "alpha" ? "rgba(34,211,238,0.8)" : "rgba(192,132,252,0.8)",
+                          boxShadow: isSwitch ? `0 0 6px ${s.dominant === "alpha" ? "#22d3ee" : "#c084fc"}` : "none",
+                          opacity: 0.4 + (i / arr.length) * 0.6,
+                          outline: isSwitch ? `1px solid ${s.dominant === "alpha" ? "#22d3ee" : "#c084fc"}` : "none",
+                        }}
+                      />
+                    );
+                  })}
                 </div>
-
+                <div className="flex justify-between mt-1">
+                  <span className="font-mono text-xs text-white/15">← 8 сек назад</span>
+                  <span className="font-mono text-xs text-yellow-400/60">сейчас →</span>
+                </div>
               </div>
             )}
 
