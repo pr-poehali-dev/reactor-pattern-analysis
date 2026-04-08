@@ -323,6 +323,10 @@ export default function Index() {
         </div>
       </div>
 
+      {/* Всегда в DOM — не размонтируются при смене вкладки */}
+      <video ref={videoRef} className="hidden" autoPlay muted playsInline />
+      <canvas ref={canvasRef} className="hidden" />
+
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
 
         {/* ── ЗАХВАТ ЭКРАНА ── */}
@@ -505,8 +509,11 @@ export default function Index() {
               >
                 {step !== "idle" ? (
                   <>
-                    <video ref={videoRef} className="w-full h-full object-contain" autoPlay muted playsInline />
-                    <canvas ref={canvasRef} className="hidden" />
+                    <video
+                      className="w-full h-full object-contain"
+                      autoPlay muted playsInline
+                      ref={el => { if (el && streamRef.current && el.srcObject !== streamRef.current) el.srcObject = streamRef.current; }}
+                    />
 
                     {/* Оверлей выделения */}
                     {selectionMode && drawing && drawStart && drawCurrent && (
