@@ -232,7 +232,7 @@ export default function Index() {
         const flickerStats = computeFlickerStats(flickerBufRef.current);
 
         setHistory(prev => {
-          const prevPred = predict(prev, flickerStats.bias, flickerStats.rate);
+          const prevPred = predict(prev, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
           const predictedBefore = prevPred.reactor;
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
 
@@ -242,6 +242,7 @@ export default function Index() {
             timestamp: now,
             flickerPattern: [...flickerBufRef.current],
             flickerRate: flickerStats.rate,
+            flickerSwitchCount: flickerStats.switchCount,
             flickerBias: flickerStats.bias,
             lastFlickerDominant: flickerStats.lastDominant,
             predictedBefore,
@@ -249,7 +250,7 @@ export default function Index() {
           };
 
           const next = [...prev, newResult];
-          const nextPred = predict(next, flickerStats.bias, flickerStats.rate);
+          const nextPred = predict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
           return next;
@@ -689,8 +690,11 @@ export default function Index() {
                     <p className="font-display text-lg text-yellow-400">{flickerStats.rate.toFixed(1)}<span className="text-xs text-white/30">/с</span></p>
                   </div>
                   <div className="text-center">
-                    <p className="font-mono text-xs text-white/30 mb-0.5">Переключений</p>
-                    <p className="font-display text-lg text-white/70">{flickerStats.switchCount}</p>
+                    <p className="font-mono text-xs text-white/30 mb-0.5">α↔ω / сек</p>
+                    <p className="font-display text-lg text-white/80">
+                      {flickerStats.rate.toFixed(2)}
+                      <span className="text-xs text-white/30 ml-0.5">({flickerStats.switchCount})</span>
+                    </p>
                   </div>
                   <div className="text-center">
                     <p className="font-mono text-xs text-white/30 mb-0.5">α %</p>
@@ -699,6 +703,28 @@ export default function Index() {
                   <div className="text-center">
                     <p className="font-mono text-xs text-white/30 mb-0.5">ω %</p>
                     <p className="font-display text-lg text-purple-400">{Math.round(flickerStats.omegaPct * 100)}%</p>
+                  </div>
+                </div>
+
+                {/* Шкала частоты переключений */}
+                <div className="mb-2">
+                  <div className="flex justify-between mb-1">
+                    <span className="font-mono text-white/25" style={{ fontSize: 9 }}>редко</span>
+                    <span className="font-mono text-white/40" style={{ fontSize: 10 }}>
+                      частота α↔ω: {flickerStats.rate < 0.5 ? "нет сигнала" : flickerStats.rate < 1.5 ? "медленно" : flickerStats.rate < 3 ? "умеренно" : flickerStats.rate < 5 ? "быстро" : "очень быстро"}
+                    </span>
+                    <span className="font-mono text-white/25" style={{ fontSize: 9 }}>часто</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-300"
+                      style={{
+                        width: `${Math.min(flickerStats.rate / 6 * 100, 100)}%`,
+                        background: flickerStats.rate < 1 ? "#475569"
+                          : flickerStats.rate < 2 ? "#facc15"
+                          : flickerStats.rate < 4 ? "#fb923c"
+                          : "#f43f5e",
+                      }}
+                    />
                   </div>
                 </div>
 

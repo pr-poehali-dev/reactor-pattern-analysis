@@ -21,8 +21,9 @@ export interface Pattern {
 }
 
 export interface FlickerProfile {
-  avgRate: number;       // средний темп переключений перед этим паттерном
-  avgBias: number;       // среднее смещение (>0 = α чаще, <0 = ω чаще)
+  avgRate: number;        // средний темп переключений (α↔ω в сек) перед этим паттерном
+  avgBias: number;        // среднее смещение (>0 = α чаще, <0 = ω чаще)
+  avgSwitchCount: number; // среднее число переключений за раунд
   sampleCount: number;
 }
 
@@ -70,7 +71,7 @@ function recencyWeight(index: number, total: number): number {
 // Для каждого вхождения паттерна в историю — смотрим мерцание перед ним
 
 function buildFlickerProfiles(history: RoundResult[]): Map<string, FlickerProfile> {
-  const profiles: Map<string, { rates: number[]; biases: number[] }> = new Map();
+  const profiles: Map<string, { rates: number[]; biases: number[]; switches: number[] }> = new Map();
 
   for (const len of SEQ_LENGTHS) {
     for (let i = 0; i <= history.length - len - 1; i++) {
@@ -78,18 +79,14 @@ function buildFlickerProfiles(history: RoundResult[]): Map<string, FlickerProfil
       const nextR = history[i + len];
       if (seq.some(r => r.winner === null) || nextR.winner === null) continue;
 
-      // Ключ: паттерн + следующий
       const seqKey = seq.map(r => r.winner).join(",") + "→" + nextR.winner;
-
-      // Мерцание непосредственно перед этим вхождением (последний раунд в seq)
       const lastInSeq = seq[seq.length - 1];
-      const rate = lastInSeq.flickerRate;
-      const bias = lastInSeq.flickerBias;
 
-      if (!profiles.has(seqKey)) profiles.set(seqKey, { rates: [], biases: [] });
+      if (!profiles.has(seqKey)) profiles.set(seqKey, { rates: [], biases: [], switches: [] });
       const p = profiles.get(seqKey)!;
-      p.rates.push(rate);
-      p.biases.push(bias);
+      p.rates.push(lastInSeq.flickerRate);
+      p.biases.push(lastInSeq.flickerBias);
+      p.switches.push(lastInSeq.flickerSwitchCount ?? 0);
     }
   }
 
@@ -100,6 +97,7 @@ function buildFlickerProfiles(history: RoundResult[]): Map<string, FlickerProfil
     result.set(key, {
       avgRate: data.rates.reduce((a, b) => a + b, 0) / n,
       avgBias: data.biases.reduce((a, b) => a + b, 0) / n,
+      avgSwitchCount: data.switches.reduce((a, b) => a + b, 0) / n,
       sampleCount: n,
     });
   });
@@ -209,26 +207,30 @@ function flickerPatternBonus(
   pattern: Pattern,
   flickerBias: number,
   flickerRate: number,
+  flickerSwitchCount: number,
   flickerProfiles: Map<string, FlickerProfile>
 ): { bonus: number; reason: string } {
   const key = pattern.sequence.map(r => r).join(",") + "→" + pattern.next;
   const profile = flickerProfiles.get(key);
   if (!profile || profile.sampleCount < 2) return { bonus: 0, reason: "" };
 
-  // Насколько текущее мерцание похоже на исторический профиль этого паттерна
+  // Сходство по трём осям: темп, смещение, число переключений
   const rateDiff = Math.abs(flickerRate - profile.avgRate);
   const biasDiff = Math.abs(flickerBias - profile.avgBias);
+  const switchDiff = Math.abs(flickerSwitchCount - profile.avgSwitchCount);
 
-  // Сходство: 0 (полное несоответствие) → 1 (идеальное совпадение)
   const rateSim = Math.max(0, 1 - rateDiff / 3);
   const biasSim = Math.max(0, 1 - biasDiff / 0.5);
-  const similarity = (rateSim + biasSim) / 2;
+  // switchCount: допуск ±3 переключения
+  const switchSim = Math.max(0, 1 - switchDiff / 6);
 
-  // Если похоже — бонус к паттерну, если нет — штраф
-  const bonus = (similarity - 0.5) * 0.2;
-  const direction = bonus > 0 ? "↑ совпадение мерцания" : "↓ мерцание не типично";
+  // Взвешенное сходство: switchCount даёт 40% веса
+  const similarity = rateSim * 0.3 + biasSim * 0.3 + switchSim * 0.4;
+
+  const bonus = (similarity - 0.5) * 0.22;
+  const direction = bonus > 0 ? "↑ мерцание совпадает" : "↓ мерцание не типично";
   const reason = profile.sampleCount >= 3
-    ? `${direction} (n=${profile.sampleCount}, sim=${Math.round(similarity * 100)}%)`
+    ? `${direction} (sw≈${profile.avgSwitchCount.toFixed(1)}, sim=${Math.round(similarity * 100)}%)`
     : "";
 
   return { bonus, reason };
@@ -239,7 +241,8 @@ function flickerPatternBonus(
 export function predict(
   history: RoundResult[],
   flickerBias: number,
-  flickerRate: number
+  flickerRate: number,
+  flickerSwitchCount = 0
 ): Prediction {
   const reactorHistory = history.map(r => r.winner);
   const validHistory = reactorHistory.filter(r => r !== null);
@@ -289,8 +292,8 @@ export function predict(
     signals.patternScore = patW;
     reasonParts.push(`паттерн ${bestPattern.label} len=${bestPattern.sequence.length} (${Math.round(bestPattern.confidence * 100)}%)`);
 
-    // Бонус взаимосвязи паттерн↔мерцание
-    const { bonus, reason: bonusReason } = flickerPatternBonus(bestPattern, flickerBias, flickerRate, flickerProfiles);
+    // Бонус взаимосвязи паттерн↔мерцание (включая число переключений)
+    const { bonus, reason: bonusReason } = flickerPatternBonus(bestPattern, flickerBias, flickerRate, flickerSwitchCount, flickerProfiles);
     if (bonus !== 0) {
       if (bestPattern.next === "alpha") alphaScore += bonus;
       else omegaScore += bonus;

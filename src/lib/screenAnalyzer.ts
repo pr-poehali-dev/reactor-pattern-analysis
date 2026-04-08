@@ -28,9 +28,10 @@ export interface RoundResult {
   winner: Reactor;
   timestamp: number;
   flickerPattern: FlickerSample[];
-  flickerRate: number;     // переключений в секунду
-  flickerBias: number;     // -1 (omega) .. +1 (alpha)
-  lastFlickerDominant: Reactor; // кто мерцал последним перед скачком
+  flickerRate: number;      // переключений α↔ω в секунду
+  flickerSwitchCount: number; // абс. число переключений
+  flickerBias: number;      // -1 (omega) .. +1 (alpha)
+  lastFlickerDominant: Reactor;
   predictedBefore: Reactor;
   predictionHit: boolean | null;
 }
