@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns } from "@/lib/mlPredictor";
-import { aiPredict, getThoughtLog, resetAI } from "@/lib/neuralPredictor";
+import { aiPredict, getThoughtLog, resetAI, saveMemory, loadMemory, clearMemory, hasSavedMemory, getSavedMemoryMeta } from "@/lib/neuralPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
 import type { AIPrediction, AIThought } from "@/lib/neuralPredictor";
@@ -45,6 +45,8 @@ export default function Index() {
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
   const [aiThoughts, setAiThoughts] = useState<AIThought[]>([]);
+  const [memoryStatus, setMemoryStatus] = useState<"none" | "saved" | "loaded">("none");
+  const [memoryMeta, setMemoryMeta] = useState<{ rounds: number; hypothesesCount: number; savedAt: number } | null>(null);
   const [lastFrame, setLastFrame] = useState<FrameAnalysis | null>(null);
   const [flickerSamples, setFlickerSamples] = useState<FlickerSample[]>([]);
   const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
@@ -74,6 +76,14 @@ export default function Index() {
     return () => clearInterval(t);
   }, []);
 
+  // Проверяем наличие сохранённой памяти при старте
+  useEffect(() => {
+    if (hasSavedMemory()) {
+      setMemoryMeta(getSavedMemoryMeta());
+      setMemoryStatus("saved");
+    }
+  }, []);
+
   // Обратный отсчёт 30 секунд
   useEffect(() => {
     if (!capturing) return;
@@ -100,6 +110,30 @@ export default function Index() {
     setAiPrediction(null);
     setAiThoughts([]);
     resetAI();
+  }, []);
+
+  const handleSaveMemory = useCallback(() => {
+    saveMemory();
+    const meta = getSavedMemoryMeta();
+    setMemoryMeta(meta);
+    setMemoryStatus("saved");
+  }, []);
+
+  const handleLoadMemory = useCallback(() => {
+    const result = loadMemory();
+    if (result.ok) {
+      setMemoryMeta(getSavedMemoryMeta());
+      setMemoryStatus("loaded");
+      setAiThoughts([...getThoughtLog().slice(-10)]);
+    }
+  }, []);
+
+  const handleClearMemory = useCallback(() => {
+    clearMemory();
+    setMemoryStatus("none");
+    setMemoryMeta(null);
+    setAiPrediction(null);
+    setAiThoughts([]);
   }, []);
 
   // Шаг 1: запустить стрим и показать превью
@@ -813,6 +847,59 @@ export default function Index() {
                 </div>
               </div>
             )}
+
+            {/* ── ПАМЯТЬ ИИ ── */}
+            <div className="glass-card rounded-xl overflow-hidden border" style={{ borderColor: "rgba(139,92,246,0.2)" }}>
+              <div className="flex items-center justify-between px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <Icon name="Brain" size={13} className="text-violet-400" />
+                  <span className="font-display text-xs tracking-widest text-violet-400/80 uppercase">Память ИИ</span>
+                  {memoryMeta && (
+                    <span className="font-mono text-xs text-white/25">
+                      · {memoryMeta.rounds} раундов · {memoryMeta.hypothesesCount} гипотез
+                      {memoryStatus === "loaded" && <span className="text-emerald-400/70"> · загружено</span>}
+                      {memoryStatus === "saved" && <span className="text-violet-400/70"> · сохранено {new Date(memoryMeta.savedAt).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>}
+                    </span>
+                  )}
+                  {memoryStatus === "none" && !memoryMeta && (
+                    <span className="font-mono text-xs text-white/20">· нет сохранений</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleSaveMemory}
+                    className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
+                    style={{ background: "rgba(139,92,246,0.15)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.3)" }}
+                    title="Сохранить обученные гипотезы в браузер"
+                  >
+                    <Icon name="Save" size={11} />
+                    Сохранить
+                  </button>
+                  {memoryStatus === "saved" && (
+                    <button
+                      onClick={handleLoadMemory}
+                      className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
+                      style={{ background: "rgba(52,211,153,0.1)", color: "#6ee7b7", border: "1px solid rgba(52,211,153,0.25)" }}
+                      title="Загрузить ранее сохранённые гипотезы"
+                    >
+                      <Icon name="Download" size={11} />
+                      Загрузить
+                    </button>
+                  )}
+                  {memoryStatus !== "none" && (
+                    <button
+                      onClick={handleClearMemory}
+                      className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
+                      style={{ background: "rgba(248,113,113,0.08)", color: "#fca5a5", border: "1px solid rgba(248,113,113,0.2)" }}
+                      title="Сбросить память и начать обучение заново"
+                    >
+                      <Icon name="Trash2" size={11} />
+                      Сброс
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
 
             {/* ── ИИ-ПРЕДСКАЗАТЕЛЬ ── */}
             {(aiPrediction || aiThoughts.length > 0) && (

@@ -84,6 +84,61 @@ export function resetAI() {
   aiState = createInitialState();
 }
 
+// ── Ключ localStorage ─────────────────────────────────────
+const MEMORY_KEY = "reactoros_ai_memory";
+
+interface PersistedMemory {
+  hypotheses: Array<[string, Hypothesis]>;
+  epsilon: number;
+  totalRounds: number;
+  correctPredictions: number;
+  savedAt: number;
+}
+
+export function saveMemory(): void {
+  const mem: PersistedMemory = {
+    hypotheses: [...aiState.hypotheses.entries()],
+    epsilon: aiState.epsilon,
+    totalRounds: aiState.totalRounds,
+    correctPredictions: aiState.correctPredictions,
+    savedAt: Date.now(),
+  };
+  localStorage.setItem(MEMORY_KEY, JSON.stringify(mem));
+}
+
+export function loadMemory(): { ok: boolean; rounds: number; hypothesesCount: number; savedAt: number | null } {
+  const raw = localStorage.getItem(MEMORY_KEY);
+  if (!raw) return { ok: false, rounds: 0, hypothesesCount: 0, savedAt: null };
+  try {
+    const mem: PersistedMemory = JSON.parse(raw);
+    aiState.hypotheses = new Map(mem.hypotheses);
+    aiState.epsilon = mem.epsilon ?? 0.1;
+    aiState.totalRounds = mem.totalRounds ?? 0;
+    aiState.correctPredictions = mem.correctPredictions ?? 0;
+    return { ok: true, rounds: mem.totalRounds, hypothesesCount: mem.hypotheses.length, savedAt: mem.savedAt };
+  } catch {
+    return { ok: false, rounds: 0, hypothesesCount: 0, savedAt: null };
+  }
+}
+
+export function clearMemory(): void {
+  localStorage.removeItem(MEMORY_KEY);
+  aiState = createInitialState();
+}
+
+export function hasSavedMemory(): boolean {
+  return !!localStorage.getItem(MEMORY_KEY);
+}
+
+export function getSavedMemoryMeta(): { rounds: number; hypothesesCount: number; savedAt: number } | null {
+  const raw = localStorage.getItem(MEMORY_KEY);
+  if (!raw) return null;
+  try {
+    const mem: PersistedMemory = JSON.parse(raw);
+    return { rounds: mem.totalRounds ?? 0, hypothesesCount: mem.hypotheses?.length ?? 0, savedAt: mem.savedAt };
+  } catch { return null; }
+}
+
 // ── Генератор мыслей ──────────────────────────────────────
 
 function think(type: AIThought["type"], text: string): AIThought {
@@ -541,4 +596,3 @@ export function getThoughtLog(): AIThought[] {
 export function getHypotheses(): Hypothesis[] {
   return [...aiState.hypotheses.values()].sort((a, b) => b.weight - a.weight);
 }
-
