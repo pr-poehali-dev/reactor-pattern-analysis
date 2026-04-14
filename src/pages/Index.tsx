@@ -827,7 +827,7 @@ export default function Index() {
                 </div>
 
                 {/* Разбивка сигналов */}
-                <div className="border-t px-5 py-3 grid grid-cols-6 gap-2" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                <div className="border-t px-5 py-3 grid grid-cols-4 gap-x-3 gap-y-2" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
                   {[
                     { label: "Паттерн", val: prediction.signals.patternScore, color: "#00ffcc" },
                     { label: "Мерц.↔Пат", val: prediction.signals.flickerPatternScore, color: "#34d399" },
@@ -835,16 +835,56 @@ export default function Index() {
                     { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
                     { label: "Серия 6+", val: prediction.signals.streakScore, color: "#a855f7" },
                     { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
+                    {
+                      label: prediction.modSignal ? `Шаг%${prediction.modSignal.M}` : "Цикл шаг",
+                      val: prediction.signals.modScore,
+                      color: "#f472b6",
+                    },
+                    {
+                      label: prediction.timeSignal ? `Время%${prediction.timeSignal.periodMs}мс` : "Цикл время",
+                      val: prediction.signals.timeScore,
+                      color: "#fb923c",
+                    },
                   ].map(s => (
                     <div key={s.label} className="text-center">
                       <div className="h-1 rounded-full bg-white/5 mb-1 overflow-hidden">
                         <div className="h-full rounded-full transition-all duration-500"
-                          style={{ width: `${Math.min(s.val / 0.5 * 100, 100)}%`, background: s.color }} />
+                          style={{ width: `${Math.min(s.val / 0.5 * 100, 100)}%`, background: s.color, opacity: s.val > 0 ? 1 : 0.25 }} />
                       </div>
                       <p className="font-mono text-white/25" style={{ fontSize: 9 }}>{s.label}</p>
                     </div>
                   ))}
                 </div>
+
+                {/* Детали mod/time сигналов — если найдены */}
+                {(prediction.modSignal || prediction.timeSignal) && (
+                  <div className="border-t px-5 py-2 flex flex-wrap gap-3" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                    {prediction.modSignal && (
+                      <div className="flex items-center gap-1.5 font-mono text-xs">
+                        <span style={{ color: "#f472b6" }}>◆</span>
+                        <span className="text-white/30">
+                          каждые {prediction.modSignal.M} раунда, позиция {prediction.modSignal.remainder} →{" "}
+                          <span style={{ color: prediction.modSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                            {prediction.modSignal.reactor === "alpha" ? "α" : "ω"}
+                          </span>
+                          {" "}(n={prediction.modSignal.sampleCount})
+                        </span>
+                      </div>
+                    )}
+                    {prediction.timeSignal && (
+                      <div className="flex items-center gap-1.5 font-mono text-xs">
+                        <span style={{ color: "#fb923c" }}>◆</span>
+                        <span className="text-white/30">
+                          период {prediction.timeSignal.periodMs}мс, окно {prediction.timeSignal.bucketIdx + 1}/4 →{" "}
+                          <span style={{ color: prediction.timeSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                            {prediction.timeSignal.reactor === "alpha" ? "α" : "ω"}
+                          </span>
+                          {" "}(n={prediction.timeSignal.sampleCount})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

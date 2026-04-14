@@ -1,11 +1,12 @@
 /**
- * ML-предсказатель v3:
+ * ML-предсказатель v4:
  * 1. Паттерны длиной 5 (приоритет) → 4 → 3 → 2
  * 2. Баланс 50/50 (регуляризация)
  * 3. Детектор серий 6+ (длинные серии без верхнего предела)
- * 4. Взаимосвязь паттерн↔мерцание: система обучается какой темп/смещение
- *    мерцания предшествует каждому паттерну, и использует это как доп. сигнал
+ * 4. Взаимосвязь паттерн↔мерцание
  * 5. Адаптация: скользящее окно + EMA-затухание + коррекция по точности
+ * 6. Детектор периодичности по номеру шага mod M (M от 2 до 12)
+ * 7. Детектор зависимости от абсолютного времени (мс % T для T от 500 до 5000)
  */
 import type { Reactor, RoundResult } from "./screenAnalyzer";
 
@@ -35,15 +36,35 @@ export interface Prediction {
   flickerHint: Reactor | null;
   flickerWeight: number;
   signals: SignalBreakdown;
+  modSignal: ModSignal | null;
+  timeSignal: TimeSignal | null;
 }
 
 export interface SignalBreakdown {
   patternScore: number;
   flickerScore: number;
-  flickerPatternScore: number; // бонус за совпадение мерцания с профилем паттерна
+  flickerPatternScore: number;
   balanceScore: number;
   streakScore: number;
   adaptScore: number;
+  modScore: number;       // периодичность по номеру шага mod M
+  timeScore: number;      // зависимость от абсолютного времени
+}
+
+export interface ModSignal {
+  M: number;              // найденный период
+  remainder: number;      // текущий шаг mod M
+  reactor: Reactor;       // кто побеждает на этом остатке
+  confidence: number;     // насколько выражена неравномерность
+  sampleCount: number;
+}
+
+export interface TimeSignal {
+  periodMs: number;       // найденный период в мс
+  bucketIdx: number;      // текущий временной bucket
+  reactor: Reactor;
+  confidence: number;
+  sampleCount: number;
 }
 
 // ── Настройки ────────────────────────────────────────────
@@ -236,6 +257,139 @@ function flickerPatternBonus(
   return { bonus, reason };
 }
 
+// ── Детектор периодичности по номеру шага mod M ──────────
+// Для каждого M от 2 до 12 строим таблицу: remainder → {alpha, omega}
+// Если на текущем остатке одна сторона побеждает значимо чаще — сигнал
+
+function detectModPeriodicity(history: RoundResult[]): ModSignal | null {
+  const n = history.length;
+  if (n < 10) return null;
+
+  let bestSignal: ModSignal | null = null;
+  let bestScore = 0;
+
+  for (let M = 2; M <= 12; M++) {
+    // Для каждого остатка считаем α и ω с весом давности
+    const buckets: { alphaW: number; omegaW: number; count: number }[] = Array.from({ length: M }, () => ({ alphaW: 0, omegaW: 0, count: 0 }));
+
+    for (let i = 0; i < n; i++) {
+      const r = history[i];
+      if (!r.winner) continue;
+      const rem = i % M;
+      const w = recencyWeight(i, n);
+      buckets[rem].count++;
+      if (r.winner === "alpha") buckets[rem].alphaW += w;
+      else buckets[rem].omegaW += w;
+    }
+
+    // Текущий шаг — следующий после последнего
+    const nextRem = n % M;
+    const bucket = buckets[nextRem];
+    const totalW = bucket.alphaW + bucket.omegaW;
+    if (bucket.count < 3 || totalW === 0) continue;
+
+    const alphaRate = bucket.alphaW / totalW;
+    const dominance = Math.abs(alphaRate - 0.5);
+
+    // Проверяем, что неравномерность не случайна:
+    // сравниваем с средней неравномерностью по другим остаткам
+    const otherBuckets = buckets.filter((_, idx) => idx !== nextRem);
+    const avgOtherDominance = otherBuckets.length > 0
+      ? otherBuckets.reduce((s, b) => {
+          const tw = b.alphaW + b.omegaW;
+          return tw > 0 ? s + Math.abs(b.alphaW / tw - 0.5) : s;
+        }, 0) / otherBuckets.length
+      : 0;
+
+    // Сигнал значим если текущий остаток заметно выделяется
+    const relativeStrength = dominance - avgOtherDominance;
+    if (dominance < 0.18 || relativeStrength < 0.08) continue;
+
+    // Уверенность: чем больше образцов и сильнее доминирование — тем лучше
+    const confidence = Math.min(dominance * 1.6, 0.9) * Math.min(bucket.count / 8, 1);
+    const score = confidence * relativeStrength;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestSignal = {
+        M,
+        remainder: nextRem,
+        reactor: alphaRate >= 0.5 ? "alpha" : "omega",
+        confidence,
+        sampleCount: bucket.count,
+      };
+    }
+  }
+
+  return bestSignal;
+}
+
+// ── Детектор зависимости от абсолютного времени (мс) ─────
+// Разбиваем timestamp по нескольким периодам T (500мс..5000мс)
+// Смотрим: в каком временном bucket сейчас находимся и кто там побеждает
+
+function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): TimeSignal | null {
+  const n = history.length;
+  if (n < 10) return null;
+
+  // Проверяем периоды: 500, 750, 1000, 1500, 2000, 3000, 5000 мс
+  const periods = [500, 750, 1000, 1500, 2000, 3000, 5000];
+  // Делим каждый период на 4 bucket'а → ширина bucket = T/4
+  const BUCKETS = 4;
+
+  let bestSignal: TimeSignal | null = null;
+  let bestScore = 0;
+
+  for (const T of periods) {
+    const bucketSize = T / BUCKETS;
+    const table: { alphaW: number; omegaW: number; count: number }[] = Array.from({ length: BUCKETS }, () => ({ alphaW: 0, omegaW: 0, count: 0 }));
+
+    for (let i = 0; i < n; i++) {
+      const r = history[i];
+      if (!r.winner) continue;
+      const bucketIdx = Math.floor((r.timestamp % T) / bucketSize) % BUCKETS;
+      const w = recencyWeight(i, n);
+      table[bucketIdx].count++;
+      if (r.winner === "alpha") table[bucketIdx].alphaW += w;
+      else table[bucketIdx].omegaW += w;
+    }
+
+    const nextBucket = Math.floor((nextTimestamp % T) / bucketSize) % BUCKETS;
+    const b = table[nextBucket];
+    const totalW = b.alphaW + b.omegaW;
+    if (b.count < 3 || totalW === 0) continue;
+
+    const alphaRate = b.alphaW / totalW;
+    const dominance = Math.abs(alphaRate - 0.5);
+
+    // Сравниваем с другими bucket'ами
+    const others = table.filter((_, idx) => idx !== nextBucket);
+    const avgOther = others.reduce((s, ob) => {
+      const tw = ob.alphaW + ob.omegaW;
+      return tw > 0 ? s + Math.abs(ob.alphaW / tw - 0.5) : s;
+    }, 0) / Math.max(others.length, 1);
+
+    const relativeStrength = dominance - avgOther;
+    if (dominance < 0.18 || relativeStrength < 0.08) continue;
+
+    const confidence = Math.min(dominance * 1.5, 0.88) * Math.min(b.count / 8, 1);
+    const score = confidence * relativeStrength;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestSignal = {
+        periodMs: T,
+        bucketIdx: nextBucket,
+        reactor: alphaRate >= 0.5 ? "alpha" : "omega",
+        confidence,
+        sampleCount: b.count,
+      };
+    }
+  }
+
+  return bestSignal;
+}
+
 // ── Основное предсказание ────────────────────────────────
 
 export function predict(
@@ -252,7 +406,8 @@ export function predict(
       reactor: null, confidence: 0,
       reason: "Недостаточно данных (нужно 2+ раунда)",
       patternMatch: null, flickerHint: null, flickerWeight: 0,
-      signals: { patternScore: 0, flickerScore: 0, flickerPatternScore: 0, balanceScore: 0, streakScore: 0, adaptScore: 0 },
+      modSignal: null, timeSignal: null,
+      signals: { patternScore: 0, flickerScore: 0, flickerPatternScore: 0, balanceScore: 0, streakScore: 0, adaptScore: 0, modScore: 0, timeScore: 0 },
     };
   }
 
@@ -275,13 +430,21 @@ export function predict(
     if (match) { bestPattern = match; break; }
   }
 
+  // ── Детекторы периодичности ───────────────────────────
+  const nextStepIdx = history.length;           // номер следующего раунда (0-based)
+  const nextTimestamp = Date.now();
+  const modSignal = detectModPeriodicity(history);
+  const timeSignal = detectTimePeriodicity(history, nextTimestamp);
+
   let alphaScore = 0;
   let omegaScore = 0;
   const signals: SignalBreakdown = {
     patternScore: 0, flickerScore: 0, flickerPatternScore: 0,
     balanceScore: 0, streakScore: 0, adaptScore: 0,
+    modScore: 0, timeScore: 0,
   };
   const reasonParts: string[] = [];
+  void nextStepIdx;
 
   // Вес паттерна по длине: 5→0.50, 4→0.42, 3→0.34, 2→0.26
   if (bestPattern) {
@@ -334,7 +497,26 @@ export function predict(
     reasonParts.push(flicker.reason);
   }
 
-  // ── 5. Адаптивная коррекция (последние 10) ───────────
+  // ── 5. Периодичность по номеру шага mod M ────────────
+  if (modSignal) {
+    // Вес пропорционален уверенности, но не доминирует над паттерном
+    const modW = modSignal.confidence * 0.28;
+    if (modSignal.reactor === "alpha") alphaScore += modW;
+    else omegaScore += modW;
+    signals.modScore = modW;
+    reasonParts.push(`шаг%${modSignal.M}=${modSignal.remainder} → ${modSignal.reactor === "alpha" ? "α" : "ω"} (${Math.round(modSignal.confidence * 100)}%, n=${modSignal.sampleCount})`);
+  }
+
+  // ── 5b. Периодичность по абсолютному времени ─────────
+  if (timeSignal) {
+    const timeW = timeSignal.confidence * 0.22;
+    if (timeSignal.reactor === "alpha") alphaScore += timeW;
+    else omegaScore += timeW;
+    signals.timeScore = timeW;
+    reasonParts.push(`t%${timeSignal.periodMs}мс bkt=${timeSignal.bucketIdx} → ${timeSignal.reactor === "alpha" ? "α" : "ω"} (${Math.round(timeSignal.confidence * 100)}%, n=${timeSignal.sampleCount})`);
+  }
+
+  // ── 6. Адаптивная коррекция (последние 10) ───────────
   const recent = history.slice(-10);
   const recentWithPred = recent.filter(r => r.predictionHit !== null);
   const recentHits = recentWithPred.filter(r => r.predictionHit).length;
@@ -364,6 +546,8 @@ export function predict(
     flickerHint: flicker.hint,
     flickerWeight: flicker.weight,
     signals,
+    modSignal,
+    timeSignal,
   };
 }
 
