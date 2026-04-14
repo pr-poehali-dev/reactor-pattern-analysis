@@ -28,12 +28,14 @@ export interface RoundResult {
   winner: Reactor;
   timestamp: number;
   flickerPattern: FlickerSample[];
-  flickerRate: number;      // переключений α↔ω в секунду
-  flickerSwitchCount: number; // абс. число переключений
-  flickerBias: number;      // -1 (omega) .. +1 (alpha)
+  flickerRate: number;
+  flickerSwitchCount: number;
+  flickerBias: number;
   lastFlickerDominant: Reactor;
-  predictedBefore: Reactor;
-  predictionHit: boolean | null;
+  predictedBefore: Reactor;        // прогноз классического ML
+  predictionHit: boolean | null;   // попадание классического ML
+  aiPredictedBefore: Reactor;      // прогноз самообучающегося ИИ
+  aiPredictionHit: boolean | null; // попадание ИИ
 }
 
 // ── Пороги ──────────────────────────────────────────────

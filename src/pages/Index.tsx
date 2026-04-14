@@ -69,6 +69,7 @@ export default function Index() {
   const lastResultTsRef = useRef<number>(0);
   const flickerBufRef = useRef<FlickerSample[]>([]);
   const phaseRef = useRef<"idle" | "flicker" | "result">("idle");
+  const aiPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
 
   // Живые часы
   useEffect(() => {
@@ -109,6 +110,7 @@ export default function Index() {
     flickerBufRef.current = [];
     setAiPrediction(null);
     setAiThoughts([]);
+    aiPredBeforeRef.current = null;
     resetAI();
   }, []);
 
@@ -272,9 +274,14 @@ export default function Index() {
         const flickerStats = computeFlickerStats(flickerBufRef.current);
 
         setHistory(prev => {
+          // Прогноз классического ML до раунда
           const prevPred = predict(prev, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
           const predictedBefore = prevPred.reactor;
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
+
+          // Прогноз ИИ до раунда (сохранён в ref с предыдущей итерации)
+          const aiPredictedBefore = aiPredBeforeRef.current;
+          const aiPredictionHit = aiPredictedBefore !== null ? aiPredictedBefore === frame.winner : null;
 
           const newResult: RoundResult = {
             id: roundIdRef.current++,
@@ -287,6 +294,8 @@ export default function Index() {
             lastFlickerDominant: flickerStats.lastDominant,
             predictedBefore,
             predictionHit,
+            aiPredictedBefore,
+            aiPredictionHit,
           };
 
           const next = [...prev, newResult];
@@ -294,8 +303,9 @@ export default function Index() {
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
 
-          // ИИ: обучаем на реальном победителе, затем строим следующий прогноз
+          // ИИ: обучаем на реальном победителе, строим следующий прогноз и сохраняем в ref
           const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
+          aiPredBeforeRef.current = aiResult.reactor;
           setAiPrediction(aiResult);
           setAiThoughts([...getThoughtLog().slice(-10)]);
 
@@ -1068,27 +1078,47 @@ export default function Index() {
                   <span className="text-white/40">{totalRounds} всего</span>
                 </div>
               </div>
-              {/* Точность прогноза */}
+              {/* Точность прогнозов — ML и ИИ */}
               {(() => {
-                const withPred = history.filter(r => r.predictionHit !== null);
-                const hits = withPred.filter(r => r.predictionHit).length;
-                const acc = withPred.length > 0 ? hits / withPred.length : null;
-                return withPred.length > 0 ? (
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-mono text-xs text-white/30">Точность прогноза</span>
-                      <span className="font-mono text-xs font-bold" style={{ color: acc! >= 0.6 ? "#00ffcc" : acc! >= 0.4 ? "#facc15" : "#f43f5e" }}>
-                        {hits}/{withPred.length} — {Math.round(acc! * 100)}%
-                      </span>
-                    </div>
-                    <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
-                      <div className="h-full rounded-full transition-all duration-700"
-                        style={{
-                          width: `${acc! * 100}%`,
-                          background: acc! >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : acc! >= 0.4 ? "#facc15" : "#f43f5e",
-                        }}
-                      />
-                    </div>
+                const withML = history.filter(r => r.predictionHit !== null);
+                const mlHits = withML.filter(r => r.predictionHit).length;
+                const mlAcc = withML.length > 0 ? mlHits / withML.length : null;
+
+                const withAI = history.filter(r => r.aiPredictionHit !== null);
+                const aiHits = withAI.filter(r => r.aiPredictionHit).length;
+                const aiAcc = withAI.length > 0 ? aiHits / withAI.length : null;
+
+                const hasAny = withML.length > 0 || withAI.length > 0;
+                return hasAny ? (
+                  <div className="space-y-1.5">
+                    {mlAcc !== null && (
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="font-mono text-xs text-white/25">ML классика</span>
+                          <span className="font-mono text-xs font-bold" style={{ color: mlAcc >= 0.6 ? "#00ffcc" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                            {mlHits}/{withML.length} — {Math.round(mlAcc * 100)}%
+                          </span>
+                        </div>
+                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${mlAcc * 100}%`, background: mlAcc >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                        </div>
+                      </div>
+                    )}
+                    {aiAcc !== null && (
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="font-mono text-xs text-white/25">ИИ самообучение</span>
+                          <span className="font-mono text-xs font-bold" style={{ color: aiAcc >= 0.6 ? "#a78bfa" : aiAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                            {aiHits}/{withAI.length} — {Math.round(aiAcc * 100)}%
+                          </span>
+                        </div>
+                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${aiAcc * 100}%`, background: aiAcc >= 0.6 ? "linear-gradient(90deg,#7c3aed,#a78bfa)" : aiAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="font-mono text-xs text-white/20">Точность появится после 2+ раундов</div>
@@ -1103,6 +1133,11 @@ export default function Index() {
               </div>
             ) : (
               <div className="overflow-y-auto flex-1 p-3 space-y-1.5">
+                {/* Легенда */}
+                <div className="flex items-center justify-end gap-2 px-1 pb-1">
+                  <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(0,255,204,0.2)" }}>ML</span>
+                  <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(139,92,246,0.3)" }}>ИИ</span>
+                </div>
                 {[...history].reverse().map((r, i) => (
                   <div
                     key={r.id}
@@ -1117,15 +1152,16 @@ export default function Index() {
                       {r.winner === "alpha" ? "α Альфа" : "ω Омега"}
                     </span>
                     <span className="text-white/30 flex-1">{fmt(r.timestamp)}</span>
-                    {/* Прогноз до раунда */}
+                    {/* ML прогноз */}
                     {r.predictedBefore !== null ? (
                       <span
-                        className="flex items-center gap-1 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
+                        className="flex items-center gap-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
                         style={{
-                          background: r.predictionHit ? "rgba(0,255,204,0.12)" : "rgba(244,63,94,0.12)",
-                          border: `1px solid ${r.predictionHit ? "rgba(0,255,204,0.3)" : "rgba(244,63,94,0.3)"}`,
+                          background: r.predictionHit ? "rgba(0,255,204,0.1)" : "rgba(244,63,94,0.1)",
+                          border: `1px solid ${r.predictionHit ? "rgba(0,255,204,0.25)" : "rgba(244,63,94,0.25)"}`,
                           color: r.predictionHit ? "#00ffcc" : "#f43f5e",
                         }}
+                        title="ML классика"
                       >
                         {r.predictionHit ? "✓" : "✗"}
                         <span style={{ color: r.predictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
@@ -1133,7 +1169,26 @@ export default function Index() {
                         </span>
                       </span>
                     ) : (
-                      <span className="text-white/15 text-xs flex-shrink-0">—</span>
+                      <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">—</span>
+                    )}
+                    {/* ИИ прогноз */}
+                    {r.aiPredictedBefore !== null ? (
+                      <span
+                        className="flex items-center gap-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
+                        style={{
+                          background: r.aiPredictionHit ? "rgba(139,92,246,0.12)" : "rgba(244,63,94,0.1)",
+                          border: `1px solid ${r.aiPredictionHit ? "rgba(139,92,246,0.35)" : "rgba(244,63,94,0.25)"}`,
+                          color: r.aiPredictionHit ? "#a78bfa" : "#f43f5e",
+                        }}
+                        title="ИИ самообучение"
+                      >
+                        {r.aiPredictionHit ? "✓" : "✗"}
+                        <span style={{ color: r.aiPredictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {r.aiPredictedBefore === "alpha" ? "α" : "ω"}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">·</span>
                     )}
                     {i === 0 && (
                       <span className="text-neon-green animate-blink text-xs">▌</span>
