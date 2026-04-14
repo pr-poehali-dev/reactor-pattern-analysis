@@ -3,9 +3,11 @@ import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns } from "@/lib/mlPredictor";
 import { aiPredict, getThoughtLog, resetAI, saveMemory, loadMemory, clearMemory, hasSavedMemory, getSavedMemoryMeta } from "@/lib/neuralPredictor";
+import { metaPredict } from "@/lib/metaPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
 import type { AIPrediction, AIThought } from "@/lib/neuralPredictor";
+import type { MetaPrediction } from "@/lib/metaPredictor";
 
 type Tab = "capture" | "model";
 
@@ -44,6 +46,7 @@ export default function Index() {
   const [history, setHistory] = useState<RoundResult[]>([]);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
+  const [metaPrediction, setMetaPrediction] = useState<MetaPrediction | null>(null);
   const [aiThoughts, setAiThoughts] = useState<AIThought[]>([]);
   const [memoryStatus, setMemoryStatus] = useState<"none" | "saved" | "loaded">("none");
   const [memoryMeta, setMemoryMeta] = useState<{ rounds: number; hypothesesCount: number; savedAt: number } | null>(null);
@@ -70,6 +73,7 @@ export default function Index() {
   const flickerBufRef = useRef<FlickerSample[]>([]);
   const phaseRef = useRef<"idle" | "flicker" | "result">("idle");
   const aiPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
+  const metaPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
 
   // Живые часы
   useEffect(() => {
@@ -111,6 +115,8 @@ export default function Index() {
     setAiPrediction(null);
     setAiThoughts([]);
     aiPredBeforeRef.current = null;
+    metaPredBeforeRef.current = null;
+    setMetaPrediction(null);
     resetAI();
   }, []);
 
@@ -283,6 +289,10 @@ export default function Index() {
           const aiPredictedBefore = aiPredBeforeRef.current;
           const aiPredictionHit = aiPredictedBefore !== null ? aiPredictedBefore === frame.winner : null;
 
+          // Прогноз метапредиктора до раунда (сохранён в ref)
+          const metaPredictedBefore = metaPredBeforeRef.current;
+          const metaPredictionHit = metaPredictedBefore !== null ? metaPredictedBefore === frame.winner : null;
+
           const newResult: RoundResult = {
             id: roundIdRef.current++,
             winner: frame.winner,
@@ -296,6 +306,8 @@ export default function Index() {
             predictionHit,
             aiPredictedBefore,
             aiPredictionHit,
+            metaPredictedBefore,
+            metaPredictionHit,
           };
 
           const next = [...prev, newResult];
@@ -308,6 +320,11 @@ export default function Index() {
           aiPredBeforeRef.current = aiResult.reactor;
           setAiPrediction(aiResult);
           setAiThoughts([...getThoughtLog().slice(-10)]);
+
+          // Мета: вычисляем на основе только что сохранённых прогнозов ML и ИИ
+          const metaResult = metaPredict(next, nextPred.reactor, aiResult.reactor);
+          metaPredBeforeRef.current = metaResult.reactor;
+          setMetaPrediction(metaResult);
 
           return next;
         });
@@ -1059,6 +1076,75 @@ export default function Index() {
               </div>
             )}
 
+            {/* ── МЕТАПРЕДИКТОР ── */}
+            {metaPrediction && metaPrediction.mode !== "insufficient" && (
+              <div className="glass-card rounded-xl overflow-hidden border"
+                style={{ borderColor: "rgba(251,191,36,0.25)", background: "rgba(251,191,36,0.03)" }}>
+                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(251,191,36,0.12)" }}>
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-60"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
+                    </span>
+                    <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Мета — анализ консенсуса</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs px-2 py-0.5 rounded"
+                      style={{
+                        background: metaPrediction.mode === "consensus_trusted" ? "rgba(34,197,94,0.12)" :
+                          metaPrediction.mode === "consensus_inverted" ? "rgba(239,68,68,0.12)" : "rgba(251,191,36,0.12)",
+                        color: metaPrediction.mode === "consensus_trusted" ? "#4ade80" :
+                          metaPrediction.mode === "consensus_inverted" ? "#f87171" : "#fbbf24",
+                        border: `1px solid ${metaPrediction.mode === "consensus_trusted" ? "rgba(34,197,94,0.25)" :
+                          metaPrediction.mode === "consensus_inverted" ? "rgba(239,68,68,0.25)" : "rgba(251,191,36,0.25)"}`,
+                      }}>
+                      {metaPrediction.mode === "consensus_trusted" && "консенсус надёжен"}
+                      {metaPrediction.mode === "consensus_inverted" && "консенсус инвертирован"}
+                      {metaPrediction.mode === "divergence" && "расхождение"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="px-4 py-4 flex items-center gap-6">
+                  <div className="text-center flex-shrink-0">
+                    <div className="font-display text-4xl font-bold mb-1"
+                      style={{ color: metaPrediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                      {metaPrediction.reactor === "alpha" ? "α" : "ω"}
+                    </div>
+                    <div className="font-mono text-xs text-white/30">
+                      {metaPrediction.reactor === "alpha" ? "Альфа" : "Омега"}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 space-y-2">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs text-white/30">Уверенность</span>
+                        <span className="font-mono text-xs font-bold"
+                          style={{ color: metaPrediction.confidence >= 0.6 ? "#fbbf24" : "#f87171" }}>
+                          {Math.round(metaPrediction.confidence * 100)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-700"
+                          style={{
+                            width: `${metaPrediction.confidence * 100}%`,
+                            background: "linear-gradient(90deg, #d97706, #fbbf24)",
+                          }} />
+                      </div>
+                    </div>
+                    <p className="font-mono text-xs text-white/30 leading-relaxed">{metaPrediction.explanation}</p>
+                    <div className="flex items-center gap-3 font-mono text-xs text-white/20">
+                      {metaPrediction.consensusAccuracy !== null && (
+                        <span>консенсус: {Math.round(metaPrediction.consensusAccuracy * 100)}%</span>
+                      )}
+                      <span>данных: {metaPrediction.sampleCount}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
           </div> {/* конец левой колонки */}
 
@@ -1078,7 +1164,7 @@ export default function Index() {
                   <span className="text-white/40">{totalRounds} всего</span>
                 </div>
               </div>
-              {/* Точность прогнозов — ML и ИИ */}
+              {/* Точность прогнозов — ML, ИИ и Мета */}
               {(() => {
                 const withML = history.filter(r => r.predictionHit !== null);
                 const mlHits = withML.filter(r => r.predictionHit).length;
@@ -1087,6 +1173,10 @@ export default function Index() {
                 const withAI = history.filter(r => r.aiPredictionHit !== null);
                 const aiHits = withAI.filter(r => r.aiPredictionHit).length;
                 const aiAcc = withAI.length > 0 ? aiHits / withAI.length : null;
+
+                const withMeta = history.filter(r => r.metaPredictionHit !== null);
+                const metaHits = withMeta.filter(r => r.metaPredictionHit).length;
+                const metaAcc = withMeta.length > 0 ? metaHits / withMeta.length : null;
 
                 const hasAny = withML.length > 0 || withAI.length > 0;
                 return hasAny ? (
@@ -1119,6 +1209,20 @@ export default function Index() {
                         </div>
                       </div>
                     )}
+                    {metaAcc !== null && (
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="font-mono text-xs text-yellow-400/50">Мета (консенсус)</span>
+                          <span className="font-mono text-xs font-bold" style={{ color: metaAcc >= 0.6 ? "#fbbf24" : metaAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                            {metaHits}/{withMeta.length} — {Math.round(metaAcc * 100)}%
+                          </span>
+                        </div>
+                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${metaAcc * 100}%`, background: metaAcc >= 0.6 ? "linear-gradient(90deg,#d97706,#fbbf24)" : metaAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="font-mono text-xs text-white/20">Точность появится после 2+ раундов</div>
@@ -1137,6 +1241,7 @@ export default function Index() {
                 <div className="flex items-center justify-end gap-2 px-1 pb-1">
                   <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(0,255,204,0.2)" }}>ML</span>
                   <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(139,92,246,0.3)" }}>ИИ</span>
+                  <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(251,191,36,0.3)" }}>Мета</span>
                 </div>
                 {[...history].reverse().map((r, i) => (
                   <div
@@ -1185,6 +1290,25 @@ export default function Index() {
                         {r.aiPredictionHit ? "✓" : "✗"}
                         <span style={{ color: r.aiPredictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
                           {r.aiPredictedBefore === "alpha" ? "α" : "ω"}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">·</span>
+                    )}
+                    {/* Мета прогноз */}
+                    {r.metaPredictedBefore !== null ? (
+                      <span
+                        className="flex items-center gap-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
+                        style={{
+                          background: r.metaPredictionHit ? "rgba(251,191,36,0.12)" : "rgba(244,63,94,0.1)",
+                          border: `1px solid ${r.metaPredictionHit ? "rgba(251,191,36,0.35)" : "rgba(244,63,94,0.25)"}`,
+                          color: r.metaPredictionHit ? "#fbbf24" : "#f43f5e",
+                        }}
+                        title="Мета-консенсус"
+                      >
+                        {r.metaPredictionHit ? "✓" : "✗"}
+                        <span style={{ color: r.metaPredictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {r.metaPredictedBefore === "alpha" ? "α" : "ω"}
                         </span>
                       </span>
                     ) : (

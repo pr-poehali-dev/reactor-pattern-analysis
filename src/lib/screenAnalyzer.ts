@@ -36,6 +36,8 @@ export interface RoundResult {
   predictionHit: boolean | null;   // попадание классического ML
   aiPredictedBefore: Reactor;      // прогноз самообучающегося ИИ
   aiPredictionHit: boolean | null; // попадание ИИ
+  metaPredictedBefore: Reactor;    // прогноз метапредиктора
+  metaPredictionHit: boolean | null; // попадание метапредиктора
 }
 
 // ── Пороги ──────────────────────────────────────────────
