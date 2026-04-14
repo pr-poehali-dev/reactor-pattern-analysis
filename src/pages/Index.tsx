@@ -2,8 +2,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns } from "@/lib/mlPredictor";
+import { aiPredict, getThoughtLog, resetAI } from "@/lib/neuralPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
+import type { AIPrediction, AIThought } from "@/lib/neuralPredictor";
 
 type Tab = "capture" | "model";
 
@@ -37,11 +39,12 @@ function ConfBar({ value, color = "#00ffcc" }: { value: number; color?: string }
 
 export default function Index() {
   const [tab, setTab] = useState<Tab>("capture");
-  // step: "idle" → "preview" (стрим есть, выделяем) → "analyzing" (анализ идёт)
   const [step, setStep] = useState<"idle" | "preview" | "analyzing">("idle");
   const [capturing, setCapturing] = useState(false);
   const [history, setHistory] = useState<RoundResult[]>([]);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
+  const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
+  const [aiThoughts, setAiThoughts] = useState<AIThought[]>([]);
   const [lastFrame, setLastFrame] = useState<FrameAnalysis | null>(null);
   const [flickerSamples, setFlickerSamples] = useState<FlickerSample[]>([]);
   const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
@@ -94,6 +97,9 @@ export default function Index() {
     phaseRef.current = "idle";
     setRoundPhase("idle");
     flickerBufRef.current = [];
+    setAiPrediction(null);
+    setAiThoughts([]);
+    resetAI();
   }, []);
 
   // Шаг 1: запустить стрим и показать превью
@@ -253,6 +259,12 @@ export default function Index() {
           const nextPred = predict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
+
+          // ИИ: обучаем на реальном победителе, затем строим следующий прогноз
+          const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
+          setAiPrediction(aiResult);
+          setAiThoughts([...getThoughtLog().slice(-10)]);
+
           return next;
         });
 
@@ -801,6 +813,115 @@ export default function Index() {
                 </div>
               </div>
             )}
+
+            {/* ── ИИ-ПРЕДСКАЗАТЕЛЬ ── */}
+            {(aiPrediction || aiThoughts.length > 0) && (
+              <div className="glass-card rounded-xl overflow-hidden border"
+                style={{ borderColor: "rgba(139,92,246,0.25)", background: "rgba(139,92,246,0.04)" }}>
+
+                {/* Заголовок */}
+                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(139,92,246,0.15)" }}>
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500"></span>
+                    </span>
+                    <span className="font-display text-xs tracking-widest text-violet-400 uppercase">ИИ — обучение в реальном времени</span>
+                  </div>
+                  {aiPrediction && (
+                    <div className="font-mono text-xs text-white/30">
+                      прогресс: <span className="text-violet-400">{Math.round(aiPrediction.learningProgress * 100)}%</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Прогноз ИИ */}
+                {aiPrediction?.reactor && (
+                  <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                    <div>
+                      <p className="font-mono text-xs text-white/25 uppercase tracking-widest mb-1.5">ИИ предсказывает</p>
+                      <ReactorBadge reactor={aiPrediction.reactor} size="lg" />
+                      {aiPrediction.dominantFeature && (
+                        <p className="font-mono text-xs text-violet-300/50 mt-1.5">▶ {aiPrediction.dominantFeature}</p>
+                      )}
+                    </div>
+                    <div className="text-center">
+                      <p className="font-display text-4xl" style={{ color: "#a78bfa", textShadow: "0 0 20px #a78bfa88" }}>
+                        {Math.round(aiPrediction.confidence * 100)}%
+                      </p>
+                      <p className="font-mono text-xs text-white/25 mt-0.5">уверенность</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Активные гипотезы */}
+                {aiPrediction?.activeHypotheses && aiPrediction.activeHypotheses.length > 0 && (
+                  <div className="px-4 py-2 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                    <p className="font-mono text-white/25 mb-1.5" style={{ fontSize: 9, letterSpacing: "0.1em" }}>АКТИВНЫЕ ГИПОТЕЗЫ</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {aiPrediction.activeHypotheses.map((h, i) => (
+                        <span key={i} className="font-mono text-xs px-2 py-0.5 rounded-md"
+                          style={{ background: "rgba(139,92,246,0.12)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.2)" }}>
+                          {h}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Мысли ИИ */}
+                {aiThoughts.length > 0 && (
+                  <div className="px-4 py-3">
+                    <p className="font-mono text-white/25 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>ВНУТРЕННИЙ МОНОЛОГ ИИ</p>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto" style={{ scrollbarWidth: "none" }}>
+                      {[...aiThoughts].reverse().map(t => {
+                        const icons: Record<AIThought["type"], string> = {
+                          observe: "👁",
+                          hypothesis: "💡",
+                          correct: "↩",
+                          doubt: "⚠",
+                          confirm: "✓",
+                          discover: "★",
+                        };
+                        const colors: Record<AIThought["type"], string> = {
+                          observe: "rgba(148,163,184,0.7)",
+                          hypothesis: "rgba(167,139,250,0.9)",
+                          correct: "rgba(251,191,36,0.85)",
+                          doubt: "rgba(248,113,113,0.8)",
+                          confirm: "rgba(52,211,153,0.9)",
+                          discover: "rgba(251,146,60,0.9)",
+                        };
+                        return (
+                          <div key={t.id} className="flex items-start gap-2 font-mono text-xs leading-relaxed">
+                            <span className="flex-shrink-0 w-4 text-center opacity-70" style={{ fontSize: 10 }}>{icons[t.type]}</span>
+                            <span style={{ color: colors[t.type] }}>{t.text}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Прогресс обучения */}
+                {aiPrediction && (
+                  <div className="px-4 pb-3">
+                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${aiPrediction.learningProgress * 100}%`,
+                          background: "linear-gradient(90deg, #7c3aed, #a78bfa, #c4b5fd)",
+                          boxShadow: "0 0 8px #a78bfa55",
+                        }}
+                      />
+                    </div>
+                    <p className="font-mono text-white/20 mt-1" style={{ fontSize: 9 }}>
+                      накоплено данных · нужно ~20 раундов для полного обучения
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
           </div>
           </div> {/* конец левой колонки */}
 
