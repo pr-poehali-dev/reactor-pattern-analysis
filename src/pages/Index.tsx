@@ -73,6 +73,8 @@ export default function Index() {
   const flickerBufRef = useRef<FlickerSample[]>([]);
   const phaseRef = useRef<"idle" | "flicker" | "result">("idle");
   const aiPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
+  const aiConfBeforeRef = useRef<number>(0.5);
+  const mlConfBeforeRef = useRef<number>(0.5);
   const metaPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
 
   // Живые часы
@@ -115,6 +117,8 @@ export default function Index() {
     setAiPrediction(null);
     setAiThoughts([]);
     aiPredBeforeRef.current = null;
+    aiConfBeforeRef.current = 0.5;
+    mlConfBeforeRef.current = 0.5;
     metaPredBeforeRef.current = null;
     setMetaPrediction(null);
     resetAI();
@@ -284,10 +288,12 @@ export default function Index() {
           const prevPred = predict(prev, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
           const predictedBefore = prevPred.reactor;
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
+          const mlConfidenceBefore = mlConfBeforeRef.current;
 
           // Прогноз ИИ до раунда (сохранён в ref с предыдущей итерации)
           const aiPredictedBefore = aiPredBeforeRef.current;
           const aiPredictionHit = aiPredictedBefore !== null ? aiPredictedBefore === frame.winner : null;
+          const aiConfidenceBefore = aiConfBeforeRef.current;
 
           // Прогноз метапредиктора до раунда (сохранён в ref)
           const metaPredictedBefore = metaPredBeforeRef.current;
@@ -304,25 +310,29 @@ export default function Index() {
             lastFlickerDominant: flickerStats.lastDominant,
             predictedBefore,
             predictionHit,
+            mlConfidenceBefore,
             aiPredictedBefore,
             aiPredictionHit,
+            aiConfidenceBefore,
             metaPredictedBefore,
             metaPredictionHit,
           };
 
           const next = [...prev, newResult];
           const nextPred = predict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
+          mlConfBeforeRef.current = nextPred.confidence;
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
 
           // ИИ: обучаем на реальном победителе, строим следующий прогноз и сохраняем в ref
           const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
           aiPredBeforeRef.current = aiResult.reactor;
+          aiConfBeforeRef.current = aiResult.confidence;
           setAiPrediction(aiResult);
           setAiThoughts([...getThoughtLog().slice(-10)]);
 
-          // Мета: вычисляем на основе только что сохранённых прогнозов ML и ИИ
-          const metaResult = metaPredict(next, nextPred.reactor, aiResult.reactor);
+          // Мета: вычисляем с учётом профилей уверенности ML и ИИ
+          const metaResult = metaPredict(next, nextPred.reactor, nextPred.confidence, aiResult.reactor, aiResult.confidence);
           metaPredBeforeRef.current = metaResult.reactor;
           setMetaPrediction(metaResult);
 
@@ -1086,21 +1096,23 @@ export default function Index() {
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-60"></span>
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
                     </span>
-                    <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Мета — анализ консенсуса</span>
+                    <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Мета — профиль уверенности</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-xs px-2 py-0.5 rounded"
                       style={{
-                        background: metaPrediction.mode === "consensus_trusted" ? "rgba(34,197,94,0.12)" :
-                          metaPrediction.mode === "consensus_inverted" ? "rgba(239,68,68,0.12)" : "rgba(251,191,36,0.12)",
-                        color: metaPrediction.mode === "consensus_trusted" ? "#4ade80" :
-                          metaPrediction.mode === "consensus_inverted" ? "#f87171" : "#fbbf24",
-                        border: `1px solid ${metaPrediction.mode === "consensus_trusted" ? "rgba(34,197,94,0.25)" :
-                          metaPrediction.mode === "consensus_inverted" ? "rgba(239,68,68,0.25)" : "rgba(251,191,36,0.25)"}`,
+                        background: metaPrediction.mode === "profile_trusted" ? "rgba(34,197,94,0.12)" :
+                          metaPrediction.mode === "profile_inverted" ? "rgba(239,68,68,0.12)" : "rgba(251,191,36,0.12)",
+                        color: metaPrediction.mode === "profile_trusted" ? "#4ade80" :
+                          metaPrediction.mode === "profile_inverted" ? "#f87171" : "#fbbf24",
+                        border: `1px solid ${metaPrediction.mode === "profile_trusted" ? "rgba(34,197,94,0.25)" :
+                          metaPrediction.mode === "profile_inverted" ? "rgba(239,68,68,0.25)" : "rgba(251,191,36,0.25)"}`,
                       }}>
-                      {metaPrediction.mode === "consensus_trusted" && "консенсус надёжен"}
-                      {metaPrediction.mode === "consensus_inverted" && "консенсус инвертирован"}
-                      {metaPrediction.mode === "divergence" && "расхождение"}
+                      {metaPrediction.mode === "profile_trusted" && "профиль надёжен"}
+                      {metaPrediction.mode === "profile_inverted" && "профиль инвертирован"}
+                      {metaPrediction.mode === "profile_pick_ml" && "лидер: ML"}
+                      {metaPrediction.mode === "profile_pick_ai" && "лидер: ИИ"}
+                      {metaPrediction.mode === "insufficient" && "мало данных"}
                     </span>
                   </div>
                 </div>
@@ -1117,12 +1129,16 @@ export default function Index() {
                   </div>
 
                   <div className="flex-1 space-y-2">
+                    <div className="font-mono text-xs px-2 py-1 rounded" style={{ background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.12)", color: "#fbbf24" }}>
+                      {metaPrediction.profileKey}
+                    </div>
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="font-mono text-xs text-white/30">Уверенность</span>
+                        <span className="font-mono text-xs text-white/30">Точность профиля</span>
                         <span className="font-mono text-xs font-bold"
                           style={{ color: metaPrediction.confidence >= 0.6 ? "#fbbf24" : "#f87171" }}>
                           {Math.round(metaPrediction.confidence * 100)}%
+                          {metaPrediction.profileSamples > 0 && <span className="text-white/20 font-normal"> · {metaPrediction.profileSamples} набл.</span>}
                         </span>
                       </div>
                       <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
@@ -1134,11 +1150,8 @@ export default function Index() {
                       </div>
                     </div>
                     <p className="font-mono text-xs text-white/30 leading-relaxed">{metaPrediction.explanation}</p>
-                    <div className="flex items-center gap-3 font-mono text-xs text-white/20">
-                      {metaPrediction.consensusAccuracy !== null && (
-                        <span>консенсус: {Math.round(metaPrediction.consensusAccuracy * 100)}%</span>
-                      )}
-                      <span>данных: {metaPrediction.sampleCount}</span>
+                    <div className="font-mono text-xs text-white/20">
+                      всего раундов: {metaPrediction.sampleCount}
                     </div>
                   </div>
                 </div>

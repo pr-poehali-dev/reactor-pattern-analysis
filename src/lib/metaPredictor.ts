@@ -1,156 +1,201 @@
 /**
- * Метапредиктор: анализирует историю консенсусов ML и ИИ,
- * учится на их совместных ошибках и исправляет прогноз.
+ * Метапредиктор: анализирует историю пар (ML, ИИ) с учётом уровней уверенности.
  *
- * Логика:
- * 1. Смотрим на каждый прошлый раунд: были ли ML и ИИ согласны (консенсус)?
- * 2. Если консенсус — чем это заканчивалось? Победой консенсуса или ошибкой?
- * 3. Текущее состояние: ML и ИИ сейчас согласны?
- *    - Если да → применяем накопленный коэффициент доверия к консенсусу
- *    - Если расходятся → выбираем того, у кого выше точность при расхождениях
+ * Вместо бинарного «согласны / расходятся» — разбивает историю на профили:
+ *   • Профиль = (mlBucket, aiBucket, agreed)
+ *   • Bucket: "high" (>70%), "mid" (50–70%), "low" (<50%)
+ *
+ * Для каждого профиля считается своя точность и принимается своё решение.
+ * Это позволяет учесть разницу между «ML 92% + ИИ 48%» и «ML 60% + ИИ 55%».
  */
 
 import type { RoundResult } from "./screenAnalyzer";
 
 export type Reactor = "alpha" | "omega" | null;
+export type ConfBucket = "high" | "mid" | "low";
+
+export type MetaMode =
+  | "profile_trusted"    // профиль исторически надёжен — доверяем лидеру
+  | "profile_inverted"   // профиль исторически ошибается — инвертируем
+  | "profile_pick_ml"    // профиль-расхождение: исторически точнее ML
+  | "profile_pick_ai"    // профиль-расхождение: исторически точнее ИИ
+  | "insufficient";      // мало данных
 
 export interface MetaPrediction {
   reactor: Reactor;
   confidence: number;
-  mode: "consensus_trusted" | "consensus_inverted" | "divergence" | "insufficient";
-  consensusAccuracy: number | null;   // точность консенсуса исторически
-  divergenceWinner: "ml" | "ai" | null; // кто точнее при расхождениях
-  sampleCount: number;                // на скольких раундах обучен
+  mode: MetaMode;
+  profileKey: string;           // описание текущего профиля, напр. "ML высокий · ИИ низкий · согласны"
+  profileAccuracy: number | null; // точность этого профиля в истории
+  profileSamples: number;       // сколько раундов с таким профилем в истории
+  sampleCount: number;          // всего раундов в истории
   explanation: string;
 }
 
-interface ConsensusRecord {
-  agreed: boolean;
-  agreeOn: Reactor;      // на чём сошлись (если agreed)
-  mlPred: Reactor;
-  aiPred: Reactor;
-  actual: Reactor;
-  mlWon: boolean | null;
-  aiWon: boolean | null;
+function bucket(conf: number): ConfBucket {
+  if (conf >= 0.70) return "high";
+  if (conf >= 0.50) return "mid";
+  return "low";
 }
 
-function buildRecords(history: RoundResult[]): ConsensusRecord[] {
-  return history
-    .filter(r => r.predictedBefore !== null || r.aiPredictedBefore !== null)
-    .map(r => {
-      const ml = r.predictedBefore;
-      const ai = r.aiPredictedBefore;
-      const actual = r.winner;
-      const agreed = ml !== null && ai !== null && ml === ai;
-      return {
-        agreed,
-        agreeOn: agreed ? ml : null,
-        mlPred: ml,
-        aiPred: ai,
-        actual,
-        mlWon: ml !== null ? ml === actual : null,
-        aiWon: ai !== null ? ai === actual : null,
-      };
-    });
+function bucketLabel(b: ConfBucket): string {
+  return b === "high" ? "высокий" : b === "mid" ? "средний" : "низкий";
 }
+
+function profileKey(mlB: ConfBucket, aiB: ConfBucket, agreed: boolean): string {
+  return `${mlB}|${aiB}|${agreed ? "agree" : "disagree"}`;
+}
+
+function profileLabel(mlB: ConfBucket, aiB: ConfBucket, agreed: boolean): string {
+  return `ML ${bucketLabel(mlB)} · ИИ ${bucketLabel(aiB)} · ${agreed ? "согласны" : "расходятся"}`;
+}
+
+interface ProfileStat {
+  total: number;
+  // для согласных: побед консенсуса
+  consensusHits: number;
+  // для расходящихся: побед ML и ИИ
+  mlHits: number;
+  aiHits: number;
+  // на кого ставить при данном профиле (лидер по conf)
+  dominantIsML: boolean; // true = ML уверенней, false = ИИ уверенней
+}
+
+const MIN_PROFILE_SAMPLES = 3;
+const MIN_TOTAL_SAMPLES = 4;
 
 export function metaPredict(
   history: RoundResult[],
   mlReactor: Reactor,
-  aiReactor: Reactor
+  mlConfidence: number,
+  aiReactor: Reactor,
+  aiConfidence: number,
 ): MetaPrediction {
-  const records = buildRecords(history);
-
-  const MIN_SAMPLES = 4;
-
-  // --- Статистика консенсусов ---
-  const consensusRounds = records.filter(r => r.agreed);
-  const consensusHits = consensusRounds.filter(r => r.agreeOn === r.actual).length;
-  const consensusAcc = consensusRounds.length >= MIN_SAMPLES
-    ? consensusHits / consensusRounds.length
-    : null;
-
-  // --- Статистика расхождений ---
-  const divergeRounds = records.filter(r => !r.agreed && r.mlPred !== null && r.aiPred !== null);
-  const mlDivergeHits = divergeRounds.filter(r => r.mlWon).length;
-  const aiDivergeHits = divergeRounds.filter(r => r.aiWon).length;
-  const divergenceWinner: "ml" | "ai" | null =
-    divergeRounds.length >= MIN_SAMPLES
-      ? mlDivergeHits >= aiDivergeHits ? "ml" : "ai"
-      : null;
+  const records = history.filter(
+    r => r.predictedBefore !== null && r.aiPredictedBefore !== null
+  );
 
   const sampleCount = records.length;
 
-  // --- Текущее состояние ---
-  const currentlyAgree = mlReactor !== null && aiReactor !== null && mlReactor === aiReactor;
+  const mlB = bucket(mlConfidence);
+  const aiB = bucket(aiConfidence);
+  const agreed = mlReactor !== null && aiReactor !== null && mlReactor === aiReactor;
+  const curKey = profileKey(mlB, aiB, agreed);
+  const curLabel = profileLabel(mlB, aiB, agreed);
 
   // Недостаточно данных
-  if (sampleCount < MIN_SAMPLES) {
+  if (sampleCount < MIN_TOTAL_SAMPLES) {
     return {
       reactor: mlReactor ?? aiReactor,
       confidence: 0,
       mode: "insufficient",
-      consensusAccuracy: null,
-      divergenceWinner: null,
+      profileKey: curLabel,
+      profileAccuracy: null,
+      profileSamples: 0,
       sampleCount,
-      explanation: `Мало данных (${sampleCount}/${MIN_SAMPLES} раундов)`,
+      explanation: `Мало данных (${sampleCount}/${MIN_TOTAL_SAMPLES} раундов)`,
     };
   }
 
-  // --- Режим: консенсус ---
-  if (currentlyAgree && consensusAcc !== null) {
-    if (consensusAcc >= 0.55) {
-      // Консенсус исторически надёжен — доверяем
-      return {
-        reactor: mlReactor,
-        confidence: consensusAcc,
-        mode: "consensus_trusted",
-        consensusAccuracy: consensusAcc,
-        divergenceWinner,
-        sampleCount,
-        explanation: `Оба согласны. Исторически консенсус верен в ${Math.round(consensusAcc * 100)}% — доверяем`,
-      };
+  // Строим статистику по профилям
+  const stats = new Map<string, ProfileStat>();
+
+  for (const r of records) {
+    const rMlB = bucket(r.mlConfidenceBefore);
+    const rAiB = bucket(r.aiConfidenceBefore);
+    const rAgreed = r.predictedBefore === r.aiPredictedBefore;
+    const key = profileKey(rMlB, rAiB, rAgreed);
+
+    if (!stats.has(key)) {
+      stats.set(key, { total: 0, consensusHits: 0, mlHits: 0, aiHits: 0, dominantIsML: r.mlConfidenceBefore >= r.aiConfidenceBefore });
+    }
+    const s = stats.get(key)!;
+    s.total++;
+
+    if (rAgreed) {
+      if (r.predictedBefore === r.winner) s.consensusHits++;
     } else {
-      // Консенсус чаще ошибается — инвертируем
-      const inverted: Reactor = mlReactor === "alpha" ? "omega" : "alpha";
-      return {
-        reactor: inverted,
-        confidence: 1 - consensusAcc,
-        mode: "consensus_inverted",
-        consensusAccuracy: consensusAcc,
-        divergenceWinner,
-        sampleCount,
-        explanation: `Оба согласны, но исторически консенсус верен лишь в ${Math.round(consensusAcc * 100)}% — инвертируем`,
-      };
+      if (r.predictionHit) s.mlHits++;
+      if (r.aiPredictionHit) s.aiHits++;
     }
   }
 
-  // --- Режим: расхождение ---
-  if (!currentlyAgree && mlReactor !== null && aiReactor !== null) {
-    const pick = divergenceWinner === "ai" ? aiReactor : mlReactor;
-    const pickAcc = divergenceWinner === "ai"
-      ? (divergeRounds.length > 0 ? aiDivergeHits / divergeRounds.length : 0.5)
-      : (divergeRounds.length > 0 ? mlDivergeHits / divergeRounds.length : 0.5);
+  const stat = stats.get(curKey);
 
+  // Нет наблюдений для текущего профиля — fallback на лидера по уверенности
+  if (!stat || stat.total < MIN_PROFILE_SAMPLES) {
+    const fallback = mlConfidence >= aiConfidence ? mlReactor : aiReactor;
+    const fallbackConf = Math.max(mlConfidence, aiConfidence);
     return {
-      reactor: pick,
-      confidence: pickAcc,
-      mode: "divergence",
-      consensusAccuracy: consensusAcc,
-      divergenceWinner,
+      reactor: fallback,
+      confidence: fallbackConf,
+      mode: "insufficient",
+      profileKey: curLabel,
+      profileAccuracy: stat ? stat.total > 0 ? (agreed ? stat.consensusHits / stat.total : Math.max(stat.mlHits, stat.aiHits) / stat.total) : null : null,
+      profileSamples: stat?.total ?? 0,
       sampleCount,
-      explanation: `Мнения разошлись. При расхождениях точнее ${divergenceWinner === "ai" ? "ИИ" : "ML"} (${Math.round(pickAcc * 100)}%)`,
+      explanation: `Профиль «${curLabel}» встречался ${stat?.total ?? 0} раз — мало для вывода. Ставлю на лидера по уверенности`,
     };
   }
 
-  // Fallback
-  return {
-    reactor: mlReactor ?? aiReactor,
-    confidence: 0.5,
-    mode: "insufficient",
-    consensusAccuracy: consensusAcc,
-    divergenceWinner,
-    sampleCount,
-    explanation: "Недостаточно данных для метапрогноза",
-  };
+  // --- Профиль найден, данных достаточно ---
+
+  if (agreed) {
+    // Консенсус: смотрим точность консенсуса для этого профиля
+    const acc = stat.consensusHits / stat.total;
+    const consensusReactor = mlReactor; // оба одинаковы
+
+    if (acc >= 0.55) {
+      return {
+        reactor: consensusReactor,
+        confidence: acc,
+        mode: "profile_trusted",
+        profileKey: curLabel,
+        profileAccuracy: acc,
+        profileSamples: stat.total,
+        sampleCount,
+        explanation: `Профиль «${curLabel}»: консенсус верен в ${Math.round(acc * 100)}% (${stat.consensusHits}/${stat.total}) — доверяем`,
+      };
+    } else {
+      const inverted: Reactor = consensusReactor === "alpha" ? "omega" : "alpha";
+      return {
+        reactor: inverted,
+        confidence: 1 - acc,
+        mode: "profile_inverted",
+        profileKey: curLabel,
+        profileAccuracy: acc,
+        profileSamples: stat.total,
+        sampleCount,
+        explanation: `Профиль «${curLabel}»: консенсус верен лишь в ${Math.round(acc * 100)}% — инвертируем`,
+      };
+    }
+  } else {
+    // Расхождение: кто точнее при этом профиле?
+    const mlAcc = stat.mlHits / stat.total;
+    const aiAcc = stat.aiHits / stat.total;
+
+    if (mlAcc >= aiAcc) {
+      return {
+        reactor: mlReactor,
+        confidence: mlAcc,
+        mode: "profile_pick_ml",
+        profileKey: curLabel,
+        profileAccuracy: mlAcc,
+        profileSamples: stat.total,
+        sampleCount,
+        explanation: `Профиль «${curLabel}»: ML точнее при расхождении (${Math.round(mlAcc * 100)}% vs ИИ ${Math.round(aiAcc * 100)}%)`,
+      };
+    } else {
+      return {
+        reactor: aiReactor,
+        confidence: aiAcc,
+        mode: "profile_pick_ai",
+        profileKey: curLabel,
+        profileAccuracy: aiAcc,
+        profileSamples: stat.total,
+        sampleCount,
+        explanation: `Профиль «${curLabel}»: ИИ точнее при расхождении (${Math.round(aiAcc * 100)}% vs ML ${Math.round(mlAcc * 100)}%)`,
+      };
+    }
+  }
 }

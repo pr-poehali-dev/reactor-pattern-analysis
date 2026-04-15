@@ -32,11 +32,13 @@ export interface RoundResult {
   flickerSwitchCount: number;
   flickerBias: number;
   lastFlickerDominant: Reactor;
-  predictedBefore: Reactor;        // прогноз классического ML
-  predictionHit: boolean | null;   // попадание классического ML
-  aiPredictedBefore: Reactor;      // прогноз самообучающегося ИИ
-  aiPredictionHit: boolean | null; // попадание ИИ
-  metaPredictedBefore: Reactor;    // прогноз метапредиктора
+  predictedBefore: Reactor;          // прогноз классического ML
+  predictionHit: boolean | null;     // попадание классического ML
+  mlConfidenceBefore: number;        // уверенность ML (0..1)
+  aiPredictedBefore: Reactor;        // прогноз самообучающегося ИИ
+  aiPredictionHit: boolean | null;   // попадание ИИ
+  aiConfidenceBefore: number;        // уверенность ИИ (0..1)
+  metaPredictedBefore: Reactor;      // прогноз метапредиктора
   metaPredictionHit: boolean | null; // попадание метапредиктора
 }
 
