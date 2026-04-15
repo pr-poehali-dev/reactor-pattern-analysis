@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
-import { predict, getTopPatterns } from "@/lib/mlPredictor";
+import { predict, getTopPatterns, getSignalDiagnostics } from "@/lib/mlPredictor";
+import type { SignalDiagnostic } from "@/lib/mlPredictor";
 import { aiPredict, getThoughtLog, resetAI, saveMemory, loadMemory, clearMemory, hasSavedMemory, getSavedMemoryMeta } from "@/lib/neuralPredictor";
 import { metaPredict } from "@/lib/metaPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
@@ -47,6 +48,7 @@ export default function Index() {
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
   const [metaPrediction, setMetaPrediction] = useState<MetaPrediction | null>(null);
+  const [signalDiagnostics, setSignalDiagnostics] = useState<SignalDiagnostic[]>([]);
   const [aiThoughts, setAiThoughts] = useState<AIThought[]>([]);
   const [memoryStatus, setMemoryStatus] = useState<"none" | "saved" | "loaded">("none");
   const [memoryMeta, setMemoryMeta] = useState<{ rounds: number; hypothesesCount: number; savedAt: number } | null>(null);
@@ -323,6 +325,7 @@ export default function Index() {
           mlConfBeforeRef.current = nextPred.confidence;
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
+          setSignalDiagnostics(getSignalDiagnostics());
 
           // ИИ: обучаем на реальном победителе, строим следующий прогноз и сохраняем в ref
           const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
@@ -894,6 +897,35 @@ export default function Index() {
                     </div>
                   ))}
                 </div>
+
+                {/* Диагностика точности сигналов */}
+                {signalDiagnostics.some(s => s.accuracy !== null) && (
+                  <div className="border-t px-5 py-3" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
+                    <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9 }}>ТОЧНОСТЬ СИГНАЛОВ (последние {80} раундов)</p>
+                    <div className="space-y-1.5">
+                      {signalDiagnostics.map(s => {
+                        if (s.accuracy === null) return null;
+                        const acc = s.accuracy;
+                        const pct = Math.round(acc * 100);
+                        const isGood = acc >= 0.55;
+                        const isBad = acc < 0.46;
+                        const barColor = isGood ? s.color : isBad ? "#f43f5e" : "#6b7280";
+                        const textColor = isGood ? s.color : isBad ? "#f87171" : "#6b7280";
+                        return (
+                          <div key={s.key} className="flex items-center gap-2">
+                            <span className="font-mono w-20 flex-shrink-0" style={{ fontSize: 9, color: textColor }}>{s.label}</span>
+                            <div className="flex-1 h-1 rounded-full bg-white/5 overflow-hidden">
+                              <div className="h-full rounded-full transition-all duration-700"
+                                style={{ width: `${pct}%`, background: barColor }} />
+                            </div>
+                            <span className="font-mono font-bold w-8 text-right flex-shrink-0" style={{ fontSize: 9, color: textColor }}>{pct}%</span>
+                            <span className="font-mono text-white/15 flex-shrink-0" style={{ fontSize: 9 }}>×{s.multiplier.toFixed(1)} n={s.samples}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Детали mod/time сигналов — если найдены */}
                 {(prediction.modSignal || prediction.timeSignal) && (

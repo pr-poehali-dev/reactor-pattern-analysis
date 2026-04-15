@@ -79,33 +79,88 @@ const RECENCY_WINDOW = 25;
 const BALANCE_PULL = 0.12;
 
 // ── Хранилище точности сигналов (адаптивные веса) ────────
-// Ключ → { hits, total } за последние MAX_SIGNAL_HISTORY раундов
+// Ключ → массив результатов за последние MAX_SIGNAL_HISTORY раундов
 
-const MAX_SIGNAL_HISTORY = 60;
+const MAX_SIGNAL_HISTORY = 80;
+const MIN_SIGNAL_SAMPLES = 6; // минимум для показа точности
 
-interface SignalStat { hits: number; total: number }
+interface SignalStat { hit: boolean }
 const signalStats: Map<string, SignalStat[]> = new Map();
 
 function recordSignalResult(key: string, hit: boolean) {
   if (!signalStats.has(key)) signalStats.set(key, []);
   const arr = signalStats.get(key)!;
-  arr.push({ hits: hit ? 1 : 0, total: 1 });
+  arr.push({ hit });
   if (arr.length > MAX_SIGNAL_HISTORY) arr.shift();
 }
 
 function signalAccuracy(key: string): number | null {
   const arr = signalStats.get(key);
-  if (!arr || arr.length < 6) return null;
-  const hits = arr.reduce((s, x) => s + x.hits, 0);
-  return hits / arr.length;
+  if (!arr || arr.length < MIN_SIGNAL_SAMPLES) return null;
+  return arr.filter(x => x.hit).length / arr.length;
+}
+
+function signalSampleCount(key: string): number {
+  return signalStats.get(key)?.length ?? 0;
 }
 
 // Вес сигнала на основе его исторической точности
-// Точность 50% → множитель 1.0, 60% → 1.4, 70% → 1.8, 40% → 0.6
+// 50% → ×1.0, 60% → ×1.4, 70% → ×1.8, 40% → ×0.6, 30% → ×0.3
 function signalMultiplier(key: string): number {
   const acc = signalAccuracy(key);
   if (acc === null) return 1.0;
   return Math.max(0.3, 0.2 + acc * 1.6);
+}
+
+// ── Снапшот предыдущих сигналов для записи точности ──────
+interface SignalSnapshot {
+  pattern: Reactor;
+  flicker: Reactor;
+  streak: Reactor;
+  mod: Reactor;
+  time: Reactor;
+  lag: Reactor;
+  alternation: Reactor;
+}
+const prevSnapshot: SignalSnapshot | null = null;
+
+function updateSignalAccuracies(actual: Reactor) {
+  if (!prevSnapshot || actual === null) return;
+  const snap = prevSnapshot;
+  if (snap.pattern !== null)     recordSignalResult("pattern",     snap.pattern === actual);
+  if (snap.flicker !== null)     recordSignalResult("flicker",     snap.flicker === actual);
+  if (snap.streak !== null)      recordSignalResult("streak",      snap.streak === actual);
+  if (snap.mod !== null)         recordSignalResult("mod",         snap.mod === actual);
+  if (snap.time !== null)        recordSignalResult("time",        snap.time === actual);
+  if (snap.lag !== null)         recordSignalResult("lag",         snap.lag === actual);
+  if (snap.alternation !== null) recordSignalResult("alternation", snap.alternation === actual);
+}
+
+// ── Публичная диагностика сигналов ───────────────────────
+export interface SignalDiagnostic {
+  key: string;
+  label: string;
+  accuracy: number | null;
+  samples: number;
+  multiplier: number;
+  color: string;
+}
+
+export function getSignalDiagnostics(): SignalDiagnostic[] {
+  return [
+    { key: "pattern",     label: "Паттерн",    color: "#00ffcc" },
+    { key: "flicker",     label: "Мерцание",   color: "#facc15" },
+    { key: "streak",      label: "Серия",      color: "#a855f7" },
+    { key: "mod",         label: "Шаг (mod)",  color: "#f472b6" },
+    { key: "time",        label: "Время",      color: "#e879f9" },
+    { key: "lag",         label: "Lag-корр.",  color: "#67e8f9" },
+    { key: "alternation", label: "Чередов.",   color: "#86efac" },
+  ].map(s => ({
+    ...s,
+    accuracy: signalAccuracy(s.key),
+    samples: signalSampleCount(s.key),
+    multiplier: signalMultiplier(s.key),
+  }));
 }
 
 // ── Утилиты ──────────────────────────────────────────────
@@ -523,20 +578,7 @@ function detectAlternation(history: Reactor[], window = 20): { signal: Reactor; 
   return null;
 }
 
-// ── Обновление адаптивных весов ───────────────────────────
-// Вызывается после каждого раунда на основе истории
-
-function updateSignalStats(history: RoundResult[]) {
-  if (history.length < 2) return;
-  const last = history[history.length - 1];
-  if (last.winner === null) return;
-
-  // Патерн
-  if (last.predictedBefore !== null) {
-    recordSignalResult("pattern", last.predictionHit === true);
-    recordSignalResult("overall", last.predictionHit === true);
-  }
-}
+// ── Обновление точности сигналов на основе последнего раунда ──
 
 // ── Основное предсказание ─────────────────────────────────
 
@@ -546,7 +588,11 @@ export function predict(
   flickerRate: number,
   flickerSwitchCount = 0
 ): Prediction {
-  updateSignalStats(history);
+  // Записываем точность сигналов предыдущего раунда
+  if (history.length >= 1) {
+    const last = history[history.length - 1];
+    if (last.winner !== null) updateSignalAccuracies(last.winner);
+  }
 
   const reactorHistory = history.map(r => r.winner);
   const validHistory = reactorHistory.filter(r => r !== null);
@@ -626,6 +672,7 @@ export function predict(
 
   // ── 3. Серии: обученная вероятность ───────────────────
   const streak = detectStreak(reactorHistory);
+  let streakPrediction: Reactor = null;
   if (streak.length >= 2 && streak.side !== null) {
     const stat = streakStats.get(streak.length);
     if (stat && stat.count >= 3) {
@@ -634,12 +681,12 @@ export function predict(
       const dominance = Math.abs(changePct - 0.5);
 
       if (dominance > 0.1) {
-        // Максимальный вес серии ограничен
         const streakW = Math.min(dominance * 0.7, 0.32);
         const predictChange = changePct > 0.5;
         const predictedSide: Reactor = predictChange
           ? (streak.side === "alpha" ? "omega" : "alpha")
           : streak.side;
+        streakPrediction = predictedSide;
 
         if (predictedSide === "alpha") alphaScore += streakW;
         else omegaScore += streakW;
@@ -647,7 +694,7 @@ export function predict(
         reasonParts.push(`серия ${streak.length}× ${reactorLabel(streak.side)} → ${predictChange ? "смена" : "продолж."} (${Math.round(changePct * 100)}% смен, n=${stat.count})`);
       }
     } else if (streak.length >= 6) {
-      // Fallback если мало статистики по этой длине
+      streakPrediction = streak.side === "alpha" ? "omega" : "alpha";
       const streakW = Math.min(0.12 + Math.log(streak.length - 5) * 0.07, 0.28);
       if (streak.side === "alpha") omegaScore += streakW;
       else alphaScore += streakW;
@@ -733,6 +780,17 @@ export function predict(
   const reactor: Reactor = alphaNorm >= 0.5 ? "alpha" : "omega";
   const rawConf = Math.max(alphaNorm, 1 - alphaNorm);
   const confidence = Math.min(0.92, 0.5 + (rawConf - 0.5) * 1.6);
+
+  // Сохраняем снапшот что предсказывал каждый сигнал в этом раунде
+  prevSnapshot = {
+    pattern:     bestPattern ? bestPattern.next : null,
+    flicker:     flicker.hint,
+    streak:      streakPrediction,
+    mod:         modSignal ? modSignal.reactor : null,
+    time:        timeSignal ? timeSignal.reactor : null,
+    lag:         lagSignal ? lagSignal.reactor : null,
+    alternation: alternation ? alternation.signal : null,
+  };
 
   return {
     reactor, confidence,
