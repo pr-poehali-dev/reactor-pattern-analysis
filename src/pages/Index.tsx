@@ -870,7 +870,7 @@ export default function Index() {
                     { label: "Мерц.↔Пат", val: prediction.signals.flickerPatternScore, color: "#34d399" },
                     { label: "Мерцание", val: prediction.signals.flickerScore, color: "#facc15" },
                     { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
-                    { label: "Серия 6+", val: prediction.signals.streakScore, color: "#a855f7" },
+                    { label: "Серия", val: prediction.signals.streakScore, color: "#a855f7" },
                     { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
                     {
                       label: prediction.modSignal ? `Шаг%${prediction.modSignal.M}` : "Цикл шаг",
@@ -880,8 +880,10 @@ export default function Index() {
                     {
                       label: prediction.timeSignal ? `Время%${prediction.timeSignal.periodMs}мс` : "Цикл время",
                       val: prediction.signals.timeScore,
-                      color: "#fb923c",
+                      color: "#e879f9",
                     },
+                    { label: "Lag-корр.", val: prediction.signals.lagScore, color: "#67e8f9" },
+                    { label: "Чередов.", val: prediction.signals.alternationScore, color: "#86efac" },
                   ].map(s => (
                     <div key={s.label} className="text-center">
                       <div className="h-1 rounded-full bg-white/5 mb-1 overflow-hidden">
