@@ -313,30 +313,32 @@ function detectStreak(history: Reactor[]): { side: Reactor; length: number } {
 function flickerBaseSignal(
   flickerBias: number,
   flickerRate: number,
-  history: RoundResult[]
+  history: RoundResult[],
+  flickerSwitchCount = 0
 ): { hint: Reactor; weight: number; reason: string } {
-  if (Math.abs(flickerBias) < 0.05 || flickerRate < 0.3) {
+  if (Math.abs(flickerBias) < 0.03 || flickerRate < 0.15) {
     return { hint: null, weight: 0, reason: "" };
   }
 
   const baseHint: Reactor = flickerBias > 0 ? "omega" : "alpha";
-  const rateWeight = Math.min(flickerRate / 4, 1.0);
-  const biasWeight = Math.min(Math.abs(flickerBias) * 1.5, 1.0);
-  const weight = rateWeight * biasWeight * 0.45;
+  const rateWeight = Math.min(flickerRate / 2.5, 1.0);
+  const biasWeight = Math.min(Math.abs(flickerBias) * 2.0, 1.0);
+  const switchBonus = Math.min(flickerSwitchCount / 10, 0.4);
+  const weight = (rateWeight * biasWeight * 0.55) + switchBonus * 0.15;
 
-  const withFlicker = history.filter(r => r.flickerBias !== 0 && r.flickerRate > 0.3);
+  const withFlicker = history.filter(r => r.flickerBias !== 0 && r.flickerRate > 0.15);
   if (withFlicker.length >= 3) {
     const hits = withFlicker.filter(r => {
       const fp: Reactor = r.flickerBias > 0 ? "omega" : "alpha";
       return fp === r.winner;
     }).length;
     const acc = hits / withFlicker.length;
-    const multiplier = 0.3 + acc * 1.4;
-    const adj = Math.min(weight * multiplier, 0.5);
-    return { hint: baseHint, weight: adj, reason: `мерц. ${flickerRate.toFixed(1)}/с (точн. ${Math.round(acc * 100)}%)` };
+    const multiplier = 0.4 + acc * 1.6;
+    const adj = Math.min(weight * multiplier, 0.62);
+    return { hint: baseHint, weight: adj, reason: `мерц. ${flickerRate.toFixed(1)}/с sw=${flickerSwitchCount} (точн. ${Math.round(acc * 100)}%)` };
   }
 
-  return { hint: baseHint, weight, reason: `мерц. ${flickerRate.toFixed(1)}/с` };
+  return { hint: baseHint, weight, reason: `мерц. ${flickerRate.toFixed(1)}/с sw=${flickerSwitchCount}` };
 }
 
 // ── Сигнал взаимосвязи паттерн↔мерцание ─────────────────
@@ -356,13 +358,13 @@ function flickerPatternBonus(
   const biasDiff = Math.abs(flickerBias - profile.avgBias);
   const switchDiff = Math.abs(flickerSwitchCount - profile.avgSwitchCount);
 
-  const rateSim = Math.max(0, 1 - rateDiff / 3);
-  const biasSim = Math.max(0, 1 - biasDiff / 0.5);
-  const switchSim = Math.max(0, 1 - switchDiff / 6);
+  const rateSim = Math.max(0, 1 - rateDiff / 2);
+  const biasSim = Math.max(0, 1 - biasDiff / 0.35);
+  const switchSim = Math.max(0, 1 - switchDiff / 4);
 
-  const similarity = rateSim * 0.3 + biasSim * 0.3 + switchSim * 0.4;
+  const similarity = rateSim * 0.25 + biasSim * 0.25 + switchSim * 0.5;
 
-  const bonus = (similarity - 0.5) * 0.22;
+  const bonus = (similarity - 0.5) * 0.34;
   const direction = bonus > 0 ? "↑ мерцание совпадает" : "↓ мерцание не типично";
   const reason = profile.sampleCount >= 3
     ? `${direction} (sim=${Math.round(similarity * 100)}%)`
@@ -465,9 +467,9 @@ function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): T
     }, 0) / Math.max(others.length, 1);
 
     const relativeStrength = dominance - avgOther;
-    if (dominance < 0.18 || relativeStrength < 0.08) continue;
+    if (dominance < 0.12 || relativeStrength < 0.05) continue;
 
-    const confidence = Math.min(dominance * 1.5, 0.88) * Math.min(b.count / 8, 1);
+    const confidence = Math.min(dominance * 1.8, 0.92) * Math.min(b.count / 6, 1);
     const score = confidence * relativeStrength;
 
     if (score > bestScore) {
@@ -696,7 +698,7 @@ export function predict(
   }
 
   // ── 4. Мерцание ────────────────────────────────────────
-  const flicker = flickerBaseSignal(flickerBias, flickerRate, history);
+  const flicker = flickerBaseSignal(flickerBias, flickerRate, history, flickerSwitchCount);
   if (flicker.hint) {
     if (flicker.hint === "alpha") alphaScore += flicker.weight;
     else omegaScore += flicker.weight;
@@ -717,7 +719,7 @@ export function predict(
   // ── 6. Периодичность по времени ────────────────────────
   if (timeSignal) {
     const timeMult = signalMultiplier("time");
-    const timeW = timeSignal.confidence * 0.22 * timeMult;
+    const timeW = timeSignal.confidence * 0.34 * timeMult;
     if (timeSignal.reactor === "alpha") alphaScore += timeW;
     else omegaScore += timeW;
     signals.timeScore = timeW;
