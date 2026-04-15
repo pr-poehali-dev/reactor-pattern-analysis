@@ -501,14 +501,6 @@ function detectLagCorrelations(history: Reactor[]): LagSignal | null {
   for (let lag = 2; lag <= 5; lag++) {
     let alphaW = 0, omegaW = 0, count = 0;
 
-    for (let i = lag; i < n; i++) {
-      const anchor = valid[i - lag];
-      const current = valid[i - 1]; // последний известный
-      const isLastRound = i === n - 1;
-      if (!isLastRound) continue; // нас интересует только предсказание следующего
-      void anchor; void current;
-    }
-
     // Для предсказания: смотрим что было lag шагов назад
     const anchorVal = valid[n - lag];
     if (!anchorVal) continue;
