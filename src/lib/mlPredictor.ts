@@ -122,7 +122,7 @@ interface SignalSnapshot {
   lag: Reactor;
   alternation: Reactor;
 }
-const prevSnapshot: SignalSnapshot | null = null;
+let prevSnapshot: SignalSnapshot | null = null;
 
 function updateSignalAccuracies(actual: Reactor) {
   if (!prevSnapshot || actual === null) return;
