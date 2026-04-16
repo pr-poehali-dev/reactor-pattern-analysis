@@ -877,20 +877,15 @@ export default function Index() {
                     { label: "Мерц.↔Пат", val: prediction.signals.flickerPatternScore, color: "#34d399" },
                     { label: "Мерцание", val: prediction.signals.flickerScore, color: "#facc15" },
                     { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
-                    { label: "Серия", val: prediction.signals.streakScore, color: "#a855f7" },
                     { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
-                    {
-                      label: prediction.modSignal ? `Шаг%${prediction.modSignal.M}` : "Цикл шаг",
-                      val: prediction.signals.modScore,
-                      color: "#f472b6",
-                    },
                     {
                       label: prediction.timeSignal ? `Время%${prediction.timeSignal.periodMs}мс` : "Цикл время",
                       val: prediction.signals.timeScore,
                       color: "#e879f9",
                     },
-                    { label: "Lag-корр.", val: prediction.signals.lagScore, color: "#67e8f9" },
                     { label: "Чередов.", val: prediction.signals.alternationScore, color: "#86efac" },
+                    { label: "Мерц.серии", val: prediction.signals.streakFlickerScore, color: "#fb923c" },
+                    { label: "Комбо", val: prediction.signals.comboScore, color: "#818cf8" },
                   ].map(s => (
                     <div key={s.label} className="text-center">
                       <div className="h-1 rounded-full bg-white/5 mb-1 overflow-hidden">
@@ -931,33 +926,19 @@ export default function Index() {
                   </div>
                 )}
 
-                {/* Детали mod/time сигналов — если найдены */}
-                {(prediction.modSignal || prediction.timeSignal) && (
+                {/* Детали time сигнала — если найден */}
+                {prediction.timeSignal && (
                   <div className="border-t px-5 py-2 flex flex-wrap gap-3" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                    {prediction.modSignal && (
-                      <div className="flex items-center gap-1.5 font-mono text-xs">
-                        <span style={{ color: "#f472b6" }}>◆</span>
-                        <span className="text-white/30">
-                          каждые {prediction.modSignal.M} раунда, позиция {prediction.modSignal.remainder} →{" "}
-                          <span style={{ color: prediction.modSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                            {prediction.modSignal.reactor === "alpha" ? "α" : "ω"}
-                          </span>
-                          {" "}(n={prediction.modSignal.sampleCount})
+                    <div className="flex items-center gap-1.5 font-mono text-xs">
+                      <span style={{ color: "#e879f9" }}>◆</span>
+                      <span className="text-white/30">
+                        период {prediction.timeSignal.periodMs}мс, окно {prediction.timeSignal.bucketIdx + 1}/4 →{" "}
+                        <span style={{ color: prediction.timeSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                          {prediction.timeSignal.reactor === "alpha" ? "α" : "ω"}
                         </span>
-                      </div>
-                    )}
-                    {prediction.timeSignal && (
-                      <div className="flex items-center gap-1.5 font-mono text-xs">
-                        <span style={{ color: "#fb923c" }}>◆</span>
-                        <span className="text-white/30">
-                          период {prediction.timeSignal.periodMs}мс, окно {prediction.timeSignal.bucketIdx + 1}/4 →{" "}
-                          <span style={{ color: prediction.timeSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                            {prediction.timeSignal.reactor === "alpha" ? "α" : "ω"}
-                          </span>
-                          {" "}(n={prediction.timeSignal.sampleCount})
-                        </span>
-                      </div>
-                    )}
+                        {" "}(n={prediction.timeSignal.sampleCount})
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
