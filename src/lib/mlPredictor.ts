@@ -40,7 +40,6 @@ export interface Prediction {
   signals: SignalBreakdown;
   timeSignal: TimeSignal | null;
   streakFlickerSignal: StreakFlickerSignal | null;
-  omegaStreak: OmegaStreakSignal | null;
 }
 
 export interface SignalBreakdown {
@@ -50,6 +49,8 @@ export interface SignalBreakdown {
   balanceScore: number;
   adaptScore: number;
   timeScore: number;
+  alternationScore: number;
+  streakFlickerScore: number;
   comboScore: number;
 }
 
@@ -72,7 +73,7 @@ export interface StreakFlickerSignal {
 
 // ── Настройки ────────────────────────────────────────────
 
-const SEQ_LENGTHS = [6, 5, 4, 3];
+const SEQ_LENGTHS = [5, 4, 3, 2];
 const MIN_PATTERN_COUNT = 2;
 const RECENCY_WINDOW = 25;
 const BALANCE_PULL = 0.12;
@@ -124,15 +125,19 @@ interface SignalSnapshot {
   pattern: Reactor;
   flicker: Reactor;
   time: Reactor;
+  alternation: Reactor;
+  streakFlicker: Reactor;
 }
 let prevSnapshot: SignalSnapshot | null = null;
 
 function updateSignalAccuracies(actual: Reactor) {
   if (!prevSnapshot || actual === null) return;
   const snap = prevSnapshot;
-  if (snap.pattern !== null) recordSignalResult("pattern", snap.pattern === actual);
-  if (snap.flicker !== null) recordSignalResult("flicker", snap.flicker === actual);
-  if (snap.time !== null)    recordSignalResult("time",    snap.time === actual);
+  if (snap.pattern !== null)       recordSignalResult("pattern",      snap.pattern === actual);
+  if (snap.flicker !== null)       recordSignalResult("flicker",      snap.flicker === actual);
+  if (snap.time !== null)          recordSignalResult("time",         snap.time === actual);
+  if (snap.alternation !== null)   recordSignalResult("alternation",  snap.alternation === actual);
+  if (snap.streakFlicker !== null) recordSignalResult("streakFlicker", snap.streakFlicker === actual);
 }
 
 // ── Публичная диагностика сигналов ───────────────────────
@@ -147,10 +152,12 @@ export interface SignalDiagnostic {
 
 export function getSignalDiagnostics(): SignalDiagnostic[] {
   return [
-    { key: "pattern", label: "Паттерн",  color: "#00ffcc" },
-    { key: "flicker", label: "Мерцание", color: "#facc15" },
-    { key: "time",    label: "Время",    color: "#e879f9" },
-    { key: "combo",   label: "Комбо",    color: "#818cf8" },
+    { key: "pattern",      label: "Паттерн",      color: "#00ffcc" },
+    { key: "flicker",      label: "Мерцание",     color: "#facc15" },
+    { key: "alternation",  label: "Чередов.",     color: "#86efac" },
+    { key: "time",         label: "Время",        color: "#e879f9" },
+    { key: "streakFlicker", label: "Мерц.серии",  color: "#fb923c" },
+    { key: "combo",        label: "Комбо",        color: "#818cf8" },
   ].map(s => ({
     ...s,
     accuracy: signalAccuracy(s.key),
@@ -377,57 +384,6 @@ export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): 
 
 
 
-// ── Специальный паттерн: ω×6→α (сброс счётчика) ──────────
-// Паттерн: 6 омег подряд → высокая вероятность альфы следующей.
-// Находит последнюю серию омег и проверяет, является ли она точным хвостом истории.
-
-export interface OmegaStreakSignal {
-  streakLen: number;    // текущая длина серии омег
-  reactor: Reactor;     // рекомендуемый следующий
-  confidence: number;
-  sinceReset: number;   // сколько раундов прошло с последнего "сброса" (альфы после серии ≥6)
-}
-
-function detectOmegaStreakPattern(history: Reactor[]): OmegaStreakSignal | null {
-  const valid = history.filter(r => r !== null) as ("alpha" | "omega")[];
-  if (valid.length < 4) return null;
-
-  // Считаем текущую серию омег с конца
-  let streakLen = 0;
-  for (let i = valid.length - 1; i >= 0; i--) {
-    if (valid[i] === "omega") streakLen++;
-    else break;
-  }
-
-  // Если сейчас серия ≥5 омег — ожидаем альфу
-  if (streakLen >= 5) {
-    // Уверенность растёт с длиной серии (5→60%, 6→75%, 7→85%, 8+→90%)
-    const confidence = Math.min(0.50 + (streakLen - 5) * 0.12, 0.90);
-    return { streakLen, reactor: "alpha", confidence, sinceReset: 0 };
-  }
-
-  // Ищем сколько раундов прошло после последнего "сброса" (серия ≥6 омег → следующая альфа)
-  let sinceReset = -1;
-  for (let i = valid.length - 1; i >= 6; i--) {
-    if (valid[i] === "alpha") {
-      // Проверяем: предшествовала ли ей серия ≥6 омег
-      let prevStreak = 0;
-      for (let j = i - 1; j >= 0; j--) {
-        if (valid[j] === "omega") prevStreak++;
-        else break;
-      }
-      if (prevStreak >= 6) {
-        sinceReset = valid.length - 1 - i;
-        break;
-      }
-    }
-  }
-
-  return sinceReset >= 0
-    ? { streakLen, reactor: null, confidence: 0, sinceReset }
-    : null;
-}
-
 // ── Базовый сигнал мерцания ───────────────────────────────
 
 // redness: R/(R+G) жёлтого сигнала. Чистый жёлтый ≈ 0.5, красноватый > 0.5, зеленоватый < 0.5
@@ -552,7 +508,7 @@ function flickerPatternBonus(
 
 // ── Детектор периодичности по времени ────────────────────
 
-export function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): TimeSignal | null {
+function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): TimeSignal | null {
   const n = history.length;
   if (n < 10) return null;
 
@@ -645,7 +601,7 @@ function detectAlternation(history: Reactor[], window = 20): { signal: Reactor; 
 // направление — насколько часто итог совпадал?
 // Это позволяет системе самой находить синергии между сигналами.
 
-interface SignalVote { pattern: Reactor; flicker: Reactor; time: Reactor }
+interface SignalVote { pattern: Reactor; flicker: Reactor; alternation: Reactor; time: Reactor }
 
 // Сохраняем последние голоса каждого сигнала для обучения combo
 const comboHistory: { votes: SignalVote; actual: Reactor }[] = [];
@@ -765,7 +721,8 @@ export function predict(
 
   const nextTimestamp = Date.now();
   const timeSignal = detectTimePeriodicity(history, nextTimestamp);
-  const omegaStreak = detectOmegaStreakPattern(reactorHistory);
+  const alternation = detectAlternation(reactorHistory);
+  const streakFlickerSignal = detectStreakFlickerSignal(history, flickerRate, flickerBias, flickerSwitchCount);
   const flicker = flickerBaseSignal(flickerBias, flickerRate, history, flickerSwitchCount, flickerAlphaRedness, flickerOmegaRedness);
 
   let alphaScore = 0;
@@ -773,7 +730,7 @@ export function predict(
   const signals: SignalBreakdown = {
     patternScore: 0, flickerScore: 0, flickerPatternScore: 0,
     balanceScore: 0, adaptScore: 0,
-    timeScore: 0, comboScore: 0,
+    timeScore: 0, alternationScore: 0, streakFlickerScore: 0, comboScore: 0,
   };
   const reasonParts: string[] = [];
 
@@ -820,26 +777,42 @@ export function predict(
   // ── 4. Периодичность по времени ────────────────────────
   if (timeSignal) {
     const timeMult = signalMultiplier("time");
-    // Усиленный базовый вес: 0.55 вместо 0.34 (сигнал показал 66% точность)
-    const timeW = timeSignal.confidence * 0.55 * timeMult;
+    const timeW = timeSignal.confidence * 0.34 * timeMult;
     if (timeSignal.reactor === "alpha") alphaScore += timeW;
     else omegaScore += timeW;
     signals.timeScore = timeW;
     reasonParts.push(`t%${timeSignal.periodMs}ms→${timeSignal.reactor === "alpha" ? "α" : "ω"}(${Math.round(timeSignal.confidence * 100)}%)×${timeMult.toFixed(1)}`);
   }
 
-  // ── 5. Паттерн ω×N→α (сброс счётчика) ───────────────────
-  if (omegaStreak && omegaStreak.reactor === "alpha" && omegaStreak.confidence > 0) {
-    const streakW = omegaStreak.confidence * 0.70;
-    alphaScore += streakW;
-    reasonParts.push(`ω×${omegaStreak.streakLen}→α(${Math.round(omegaStreak.confidence * 100)}%)`);
+  // ── 5. Чередование ────────────────────────────────────
+  if (alternation) {
+    const altMult = signalMultiplier("alternation");
+    const altW = Math.min(alternation.strength * 0.18, 0.22) * altMult;
+    if (alternation.signal === "alpha") alphaScore += altW;
+    else omegaScore += altW;
+    signals.alternationScore = altW;
+    reasonParts.push(`чередование→${alternation.signal === "alpha" ? "α" : "ω"} ×${altMult.toFixed(1)}`);
   }
 
-  // ── 6. Комбо: история совместных предсказаний ──────────
+  // ── 6. Мерцание серии ─────────────────────────────────
+  if (streakFlickerSignal) {
+    const sfMult = signalMultiplier("streakFlicker");
+    const sfW = streakFlickerSignal.confidence * 0.38 * sfMult;
+    if (streakFlickerSignal.reactor === "alpha") alphaScore += sfW;
+    else omegaScore += sfW;
+    signals.streakFlickerScore = sfW;
+    const sideLabel = streakFlickerSignal.streakSide === "alpha" ? "α" : "ω";
+    const outLabel = streakFlickerSignal.reactor === "alpha" ? "α" : "ω";
+    reasonParts.push(`мерц.серии ${sideLabel}×${streakFlickerSignal.streakLen}→${outLabel}(sim=${Math.round(streakFlickerSignal.similarity * 100)}%)`);
+  }
+
+  // ── 7. Комбо: история совместных предсказаний ──────────
+  // Собираем голоса активных сигналов в этом раунде
   const currentVotes: SignalVote = {
-    pattern: bestPattern ? bestPattern.next : null,
-    flicker: flicker.hint,
-    time:    timeSignal ? timeSignal.reactor : null,
+    pattern:     bestPattern ? bestPattern.next : null,
+    flicker:     flicker.hint,
+    alternation: alternation ? alternation.signal : null,
+    time:        timeSignal ? timeSignal.reactor : null,
   };
   const combo = detectComboSignal(currentVotes);
   if (combo) {
@@ -885,9 +858,11 @@ export function predict(
 
   // Сохраняем снапшот для оценки точности сигналов
   prevSnapshot = {
-    pattern: bestPattern ? bestPattern.next : null,
-    flicker: flicker.hint,
-    time:    timeSignal ? timeSignal.reactor : null,
+    pattern:      bestPattern ? bestPattern.next : null,
+    flicker:      flicker.hint,
+    time:         timeSignal ? timeSignal.reactor : null,
+    alternation:  alternation ? alternation.signal : null,
+    streakFlicker: streakFlickerSignal ? streakFlickerSignal.reactor : null,
   };
 
   return {
@@ -898,8 +873,7 @@ export function predict(
     flickerWeight: flicker.weight,
     signals,
     timeSignal,
-    streakFlickerSignal: null,
-    omegaStreak,
+    streakFlickerSignal,
   };
 }
 
