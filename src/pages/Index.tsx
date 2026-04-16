@@ -2,13 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns, getSignalDiagnostics } from "@/lib/mlPredictor";
-import type { SignalDiagnostic } from "@/lib/mlPredictor";
-import { aiPredict, getThoughtLog, resetAI, saveMemory, loadMemory, clearMemory, hasSavedMemory, getSavedMemoryMeta } from "@/lib/neuralPredictor";
-import { metaPredict } from "@/lib/metaPredictor";
+import type { SignalDiagnostic, Prediction, Pattern } from "@/lib/mlPredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
-import type { Prediction, Pattern } from "@/lib/mlPredictor";
-import type { AIPrediction, AIThought } from "@/lib/neuralPredictor";
-import type { MetaPrediction } from "@/lib/metaPredictor";
 
 type Tab = "capture" | "model";
 
@@ -46,12 +41,7 @@ export default function Index() {
   const [capturing, setCapturing] = useState(false);
   const [history, setHistory] = useState<RoundResult[]>([]);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
-  const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
-  const [metaPrediction, setMetaPrediction] = useState<MetaPrediction | null>(null);
   const [signalDiagnostics, setSignalDiagnostics] = useState<SignalDiagnostic[]>([]);
-  const [aiThoughts, setAiThoughts] = useState<AIThought[]>([]);
-  const [memoryStatus, setMemoryStatus] = useState<"none" | "saved" | "loaded">("none");
-  const [memoryMeta, setMemoryMeta] = useState<{ rounds: number; hypothesesCount: number; savedAt: number } | null>(null);
   const [lastFrame, setLastFrame] = useState<FrameAnalysis | null>(null);
   const [flickerSamples, setFlickerSamples] = useState<FlickerSample[]>([]);
   const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
@@ -74,23 +64,12 @@ export default function Index() {
   const lastResultTsRef = useRef<number>(0);
   const flickerBufRef = useRef<FlickerSample[]>([]);
   const phaseRef = useRef<"idle" | "flicker" | "result">("idle");
-  const aiPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
-  const aiConfBeforeRef = useRef<number>(0.5);
   const mlConfBeforeRef = useRef<number>(0.5);
-  const metaPredBeforeRef = useRef<import("@/lib/screenAnalyzer").Reactor>(null);
 
   // Живые часы
   useEffect(() => {
     const t = setInterval(() => setLiveTime(new Date()), 1000);
     return () => clearInterval(t);
-  }, []);
-
-  // Проверяем наличие сохранённой памяти при старте
-  useEffect(() => {
-    if (hasSavedMemory()) {
-      setMemoryMeta(getSavedMemoryMeta());
-      setMemoryStatus("saved");
-    }
   }, []);
 
   // Обратный отсчёт 30 секунд
@@ -116,39 +95,10 @@ export default function Index() {
     phaseRef.current = "idle";
     setRoundPhase("idle");
     flickerBufRef.current = [];
-    setAiPrediction(null);
-    setAiThoughts([]);
-    aiPredBeforeRef.current = null;
-    aiConfBeforeRef.current = 0.5;
     mlConfBeforeRef.current = 0.5;
-    metaPredBeforeRef.current = null;
-    setMetaPrediction(null);
-    resetAI();
   }, []);
 
-  const handleSaveMemory = useCallback(() => {
-    saveMemory();
-    const meta = getSavedMemoryMeta();
-    setMemoryMeta(meta);
-    setMemoryStatus("saved");
-  }, []);
 
-  const handleLoadMemory = useCallback(() => {
-    const result = loadMemory();
-    if (result.ok) {
-      setMemoryMeta(getSavedMemoryMeta());
-      setMemoryStatus("loaded");
-      setAiThoughts([...getThoughtLog().slice(-10)]);
-    }
-  }, []);
-
-  const handleClearMemory = useCallback(() => {
-    clearMemory();
-    setMemoryStatus("none");
-    setMemoryMeta(null);
-    setAiPrediction(null);
-    setAiThoughts([]);
-  }, []);
 
   // Шаг 1: запустить стрим и показать превью
   const startPreview = useCallback(async () => {
@@ -294,15 +244,6 @@ export default function Index() {
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
           const mlConfidenceBefore = mlConfBeforeRef.current;
 
-          // Прогноз ИИ до раунда (сохранён в ref с предыдущей итерации)
-          const aiPredictedBefore = aiPredBeforeRef.current;
-          const aiPredictionHit = aiPredictedBefore !== null ? aiPredictedBefore === frame.winner : null;
-          const aiConfidenceBefore = aiConfBeforeRef.current;
-
-          // Прогноз метапредиктора до раунда (сохранён в ref)
-          const metaPredictedBefore = metaPredBeforeRef.current;
-          const metaPredictionHit = metaPredictedBefore !== null ? metaPredictedBefore === frame.winner : null;
-
           const newResult: RoundResult = {
             id: roundIdRef.current++,
             winner: frame.winner,
@@ -317,11 +258,11 @@ export default function Index() {
             predictedBefore,
             predictionHit,
             mlConfidenceBefore,
-            aiPredictedBefore,
-            aiPredictionHit,
-            aiConfidenceBefore,
-            metaPredictedBefore,
-            metaPredictionHit,
+            aiPredictedBefore: null,
+            aiPredictionHit: null,
+            aiConfidenceBefore: 0.5,
+            metaPredictedBefore: null,
+            metaPredictionHit: null,
           };
 
           const next = [...prev, newResult];
@@ -330,18 +271,6 @@ export default function Index() {
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
           setSignalDiagnostics(getSignalDiagnostics());
-
-          // ИИ: обучаем на реальном победителе, строим следующий прогноз и сохраняем в ref
-          const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
-          aiPredBeforeRef.current = aiResult.reactor;
-          aiConfBeforeRef.current = aiResult.confidence;
-          setAiPrediction(aiResult);
-          setAiThoughts([...getThoughtLog().slice(-10)]);
-
-          // Мета: вычисляем с учётом профилей уверенности ML и ИИ
-          const metaResult = metaPredict(next, nextPred.reactor, nextPred.confidence, aiResult.reactor, aiResult.confidence);
-          metaPredBeforeRef.current = metaResult.reactor;
-          setMetaPrediction(metaResult);
 
           return next;
         });
@@ -879,12 +808,10 @@ export default function Index() {
                     { label: "Баланс", val: prediction.signals.balanceScore, color: "#38bdf8" },
                     { label: "Адапт.", val: prediction.signals.adaptScore, color: "#fb923c" },
                     {
-                      label: prediction.timeSignal ? `Время%${prediction.timeSignal.periodMs}мс` : "Цикл время",
+                      label: prediction.timeSignal ? `Время%${prediction.timeSignal.periodMs}мс` : "Время",
                       val: prediction.signals.timeScore,
                       color: "#e879f9",
                     },
-                    { label: "Чередов.", val: prediction.signals.alternationScore, color: "#86efac" },
-                    { label: "Мерц.серии", val: prediction.signals.streakFlickerScore, color: "#fb923c" },
                     { label: "Комбо", val: prediction.signals.comboScore, color: "#818cf8" },
                   ].map(s => (
                     <div key={s.label} className="text-center">
@@ -944,238 +871,7 @@ export default function Index() {
               </div>
             )}
 
-            {/* ── ПАМЯТЬ ИИ ── */}
-            <div className="glass-card rounded-xl overflow-hidden border" style={{ borderColor: "rgba(139,92,246,0.2)" }}>
-              <div className="flex items-center justify-between px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <Icon name="Brain" size={13} className="text-violet-400" />
-                  <span className="font-display text-xs tracking-widest text-violet-400/80 uppercase">Память ИИ</span>
-                  {memoryMeta && (
-                    <span className="font-mono text-xs text-white/25">
-                      · {memoryMeta.rounds} раундов · {memoryMeta.hypothesesCount} гипотез
-                      {memoryStatus === "loaded" && <span className="text-emerald-400/70"> · загружено</span>}
-                      {memoryStatus === "saved" && <span className="text-violet-400/70"> · сохранено {new Date(memoryMeta.savedAt).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>}
-                    </span>
-                  )}
-                  {memoryStatus === "none" && !memoryMeta && (
-                    <span className="font-mono text-xs text-white/20">· нет сохранений</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleSaveMemory}
-                    className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
-                    style={{ background: "rgba(139,92,246,0.15)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.3)" }}
-                    title="Сохранить обученные гипотезы в браузер"
-                  >
-                    <Icon name="Save" size={11} />
-                    Сохранить
-                  </button>
-                  {memoryStatus === "saved" && (
-                    <button
-                      onClick={handleLoadMemory}
-                      className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
-                      style={{ background: "rgba(52,211,153,0.1)", color: "#6ee7b7", border: "1px solid rgba(52,211,153,0.25)" }}
-                      title="Загрузить ранее сохранённые гипотезы"
-                    >
-                      <Icon name="Download" size={11} />
-                      Загрузить
-                    </button>
-                  )}
-                  {memoryStatus !== "none" && (
-                    <button
-                      onClick={handleClearMemory}
-                      className="flex items-center gap-1.5 font-mono text-xs px-3 py-1.5 rounded-lg transition-all"
-                      style={{ background: "rgba(248,113,113,0.08)", color: "#fca5a5", border: "1px solid rgba(248,113,113,0.2)" }}
-                      title="Сбросить память и начать обучение заново"
-                    >
-                      <Icon name="Trash2" size={11} />
-                      Сброс
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
 
-            {/* ── ИИ-ПРЕДСКАЗАТЕЛЬ ── */}
-            {(aiPrediction || aiThoughts.length > 0) && (
-              <div className="glass-card rounded-xl overflow-hidden border"
-                style={{ borderColor: "rgba(139,92,246,0.25)", background: "rgba(139,92,246,0.04)" }}>
-
-                {/* Заголовок */}
-                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(139,92,246,0.15)" }}>
-                  <div className="flex items-center gap-2">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500"></span>
-                    </span>
-                    <span className="font-display text-xs tracking-widest text-violet-400 uppercase">ИИ — обучение в реальном времени</span>
-                  </div>
-                  {aiPrediction && (
-                    <div className="font-mono text-xs text-white/30">
-                      прогресс: <span className="text-violet-400">{Math.round(aiPrediction.learningProgress * 100)}%</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Прогноз ИИ */}
-                {aiPrediction?.reactor && (
-                  <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                    <div>
-                      <p className="font-mono text-xs text-white/25 uppercase tracking-widest mb-1.5">ИИ предсказывает</p>
-                      <ReactorBadge reactor={aiPrediction.reactor} size="lg" />
-                      {aiPrediction.dominantFeature && (
-                        <p className="font-mono text-xs text-violet-300/50 mt-1.5">▶ {aiPrediction.dominantFeature}</p>
-                      )}
-                    </div>
-                    <div className="text-center">
-                      <p className="font-display text-4xl" style={{ color: "#a78bfa", textShadow: "0 0 20px #a78bfa88" }}>
-                        {Math.round(aiPrediction.confidence * 100)}%
-                      </p>
-                      <p className="font-mono text-xs text-white/25 mt-0.5">уверенность</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Активные гипотезы */}
-                {aiPrediction?.activeHypotheses && aiPrediction.activeHypotheses.length > 0 && (
-                  <div className="px-4 py-2 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                    <p className="font-mono text-white/25 mb-1.5" style={{ fontSize: 9, letterSpacing: "0.1em" }}>АКТИВНЫЕ ГИПОТЕЗЫ</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {aiPrediction.activeHypotheses.map((h, i) => (
-                        <span key={i} className="font-mono text-xs px-2 py-0.5 rounded-md"
-                          style={{ background: "rgba(139,92,246,0.12)", color: "#c4b5fd", border: "1px solid rgba(139,92,246,0.2)" }}>
-                          {h}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Мысли ИИ */}
-                {aiThoughts.length > 0 && (
-                  <div className="px-4 py-3">
-                    <p className="font-mono text-white/25 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>ВНУТРЕННИЙ МОНОЛОГ ИИ</p>
-                    <div className="space-y-1.5 max-h-48 overflow-y-auto" style={{ scrollbarWidth: "none" }}>
-                      {[...aiThoughts].reverse().map(t => {
-                        const icons: Record<AIThought["type"], string> = {
-                          observe: "👁",
-                          hypothesis: "💡",
-                          correct: "↩",
-                          doubt: "⚠",
-                          confirm: "✓",
-                          discover: "★",
-                        };
-                        const colors: Record<AIThought["type"], string> = {
-                          observe: "rgba(148,163,184,0.7)",
-                          hypothesis: "rgba(167,139,250,0.9)",
-                          correct: "rgba(251,191,36,0.85)",
-                          doubt: "rgba(248,113,113,0.8)",
-                          confirm: "rgba(52,211,153,0.9)",
-                          discover: "rgba(251,146,60,0.9)",
-                        };
-                        return (
-                          <div key={t.id} className="flex items-start gap-2 font-mono text-xs leading-relaxed">
-                            <span className="flex-shrink-0 w-4 text-center opacity-70" style={{ fontSize: 10 }}>{icons[t.type]}</span>
-                            <span style={{ color: colors[t.type] }}>{t.text}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Прогресс обучения */}
-                {aiPrediction && (
-                  <div className="px-4 pb-3">
-                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                      <div className="h-full rounded-full transition-all duration-700"
-                        style={{
-                          width: `${aiPrediction.learningProgress * 100}%`,
-                          background: "linear-gradient(90deg, #7c3aed, #a78bfa, #c4b5fd)",
-                          boxShadow: "0 0 8px #a78bfa55",
-                        }}
-                      />
-                    </div>
-                    <p className="font-mono text-white/20 mt-1" style={{ fontSize: 9 }}>
-                      накоплено данных · нужно ~20 раундов для полного обучения
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── МЕТАПРЕДИКТОР ── */}
-            {metaPrediction && metaPrediction.mode !== "insufficient" && (
-              <div className="glass-card rounded-xl overflow-hidden border"
-                style={{ borderColor: "rgba(251,191,36,0.25)", background: "rgba(251,191,36,0.03)" }}>
-                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(251,191,36,0.12)" }}>
-                  <div className="flex items-center gap-2">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-60"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
-                    </span>
-                    <span className="font-display text-xs tracking-widest text-yellow-400/80 uppercase">Мета — профиль уверенности</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs px-2 py-0.5 rounded"
-                      style={{
-                        background: metaPrediction.mode === "profile_trusted" ? "rgba(34,197,94,0.12)" :
-                          metaPrediction.mode === "profile_inverted" ? "rgba(239,68,68,0.12)" : "rgba(251,191,36,0.12)",
-                        color: metaPrediction.mode === "profile_trusted" ? "#4ade80" :
-                          metaPrediction.mode === "profile_inverted" ? "#f87171" : "#fbbf24",
-                        border: `1px solid ${metaPrediction.mode === "profile_trusted" ? "rgba(34,197,94,0.25)" :
-                          metaPrediction.mode === "profile_inverted" ? "rgba(239,68,68,0.25)" : "rgba(251,191,36,0.25)"}`,
-                      }}>
-                      {metaPrediction.mode === "profile_trusted" && "профиль надёжен"}
-                      {metaPrediction.mode === "profile_inverted" && "профиль инвертирован"}
-                      {metaPrediction.mode === "profile_pick_ml" && "лидер: ML"}
-                      {metaPrediction.mode === "profile_pick_ai" && "лидер: ИИ"}
-                      {metaPrediction.mode === "insufficient" && "мало данных"}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="px-4 py-4 flex items-center gap-6">
-                  <div className="text-center flex-shrink-0">
-                    <div className="font-display text-4xl font-bold mb-1"
-                      style={{ color: metaPrediction.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                      {metaPrediction.reactor === "alpha" ? "α" : "ω"}
-                    </div>
-                    <div className="font-mono text-xs text-white/30">
-                      {metaPrediction.reactor === "alpha" ? "Альфа" : "Омега"}
-                    </div>
-                  </div>
-
-                  <div className="flex-1 space-y-2">
-                    <div className="font-mono text-xs px-2 py-1 rounded" style={{ background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.12)", color: "#fbbf24" }}>
-                      {metaPrediction.profileKey}
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="font-mono text-xs text-white/30">Точность профиля</span>
-                        <span className="font-mono text-xs font-bold"
-                          style={{ color: metaPrediction.confidence >= 0.6 ? "#fbbf24" : "#f87171" }}>
-                          {Math.round(metaPrediction.confidence * 100)}%
-                          {metaPrediction.profileSamples > 0 && <span className="text-white/20 font-normal"> · {metaPrediction.profileSamples} набл.</span>}
-                        </span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-700"
-                          style={{
-                            width: `${metaPrediction.confidence * 100}%`,
-                            background: "linear-gradient(90deg, #d97706, #fbbf24)",
-                          }} />
-                      </div>
-                    </div>
-                    <p className="font-mono text-xs text-white/30 leading-relaxed">{metaPrediction.explanation}</p>
-                    <div className="font-mono text-xs text-white/20">
-                      всего раундов: {metaPrediction.sampleCount}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
 
           </div>
           </div> {/* конец левой колонки */}
@@ -1196,65 +892,24 @@ export default function Index() {
                   <span className="text-white/40">{totalRounds} всего</span>
                 </div>
               </div>
-              {/* Точность прогнозов — ML, ИИ и Мета */}
+              {/* Точность прогнозов — ML */}
               {(() => {
                 const withML = history.filter(r => r.predictionHit !== null);
                 const mlHits = withML.filter(r => r.predictionHit).length;
                 const mlAcc = withML.length > 0 ? mlHits / withML.length : null;
 
-                const withAI = history.filter(r => r.aiPredictionHit !== null);
-                const aiHits = withAI.filter(r => r.aiPredictionHit).length;
-                const aiAcc = withAI.length > 0 ? aiHits / withAI.length : null;
-
-                const withMeta = history.filter(r => r.metaPredictionHit !== null);
-                const metaHits = withMeta.filter(r => r.metaPredictionHit).length;
-                const metaAcc = withMeta.length > 0 ? metaHits / withMeta.length : null;
-
-                const hasAny = withML.length > 0 || withAI.length > 0;
-                return hasAny ? (
-                  <div className="space-y-1.5">
-                    {mlAcc !== null && (
-                      <div>
-                        <div className="flex items-center justify-between mb-0.5">
-                          <span className="font-mono text-xs text-white/25">ML классика</span>
-                          <span className="font-mono text-xs font-bold" style={{ color: mlAcc >= 0.6 ? "#00ffcc" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
-                            {mlHits}/{withML.length} — {Math.round(mlAcc * 100)}%
-                          </span>
-                        </div>
-                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700"
-                            style={{ width: `${mlAcc * 100}%`, background: mlAcc >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
-                        </div>
-                      </div>
-                    )}
-                    {aiAcc !== null && (
-                      <div>
-                        <div className="flex items-center justify-between mb-0.5">
-                          <span className="font-mono text-xs text-white/25">ИИ самообучение</span>
-                          <span className="font-mono text-xs font-bold" style={{ color: aiAcc >= 0.6 ? "#a78bfa" : aiAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
-                            {aiHits}/{withAI.length} — {Math.round(aiAcc * 100)}%
-                          </span>
-                        </div>
-                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700"
-                            style={{ width: `${aiAcc * 100}%`, background: aiAcc >= 0.6 ? "linear-gradient(90deg,#7c3aed,#a78bfa)" : aiAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
-                        </div>
-                      </div>
-                    )}
-                    {metaAcc !== null && (
-                      <div>
-                        <div className="flex items-center justify-between mb-0.5">
-                          <span className="font-mono text-xs text-yellow-400/50">Мета (консенсус)</span>
-                          <span className="font-mono text-xs font-bold" style={{ color: metaAcc >= 0.6 ? "#fbbf24" : metaAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
-                            {metaHits}/{withMeta.length} — {Math.round(metaAcc * 100)}%
-                          </span>
-                        </div>
-                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700"
-                            style={{ width: `${metaAcc * 100}%`, background: metaAcc >= 0.6 ? "linear-gradient(90deg,#d97706,#fbbf24)" : metaAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
-                        </div>
-                      </div>
-                    )}
+                return mlAcc !== null ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-0.5">
+                      <span className="font-mono text-xs text-white/25">Точность ML</span>
+                      <span className="font-mono text-xs font-bold" style={{ color: mlAcc >= 0.6 ? "#00ffcc" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                        {mlHits}/{withML.length} — {Math.round(mlAcc * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${mlAcc * 100}%`, background: mlAcc >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                    </div>
                   </div>
                 ) : (
                   <div className="font-mono text-xs text-white/20">Точность появится после 2+ раундов</div>
@@ -1272,8 +927,6 @@ export default function Index() {
                 {/* Легенда */}
                 <div className="flex items-center justify-end gap-2 px-1 pb-1">
                   <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(0,255,204,0.2)" }}>ML</span>
-                  <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(139,92,246,0.3)" }}>ИИ</span>
-                  <span className="font-mono text-white/20 px-1.5 py-0.5 rounded text-xs" style={{ border: "1px solid rgba(251,191,36,0.3)" }}>Мета</span>
                 </div>
                 {[...history].reverse().map((r, i) => (
                   <div
@@ -1308,44 +961,7 @@ export default function Index() {
                     ) : (
                       <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">—</span>
                     )}
-                    {/* ИИ прогноз */}
-                    {r.aiPredictedBefore !== null ? (
-                      <span
-                        className="flex items-center gap-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
-                        style={{
-                          background: r.aiPredictionHit ? "rgba(139,92,246,0.12)" : "rgba(244,63,94,0.1)",
-                          border: `1px solid ${r.aiPredictionHit ? "rgba(139,92,246,0.35)" : "rgba(244,63,94,0.25)"}`,
-                          color: r.aiPredictionHit ? "#a78bfa" : "#f43f5e",
-                        }}
-                        title="ИИ самообучение"
-                      >
-                        {r.aiPredictionHit ? "✓" : "✗"}
-                        <span style={{ color: r.aiPredictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                          {r.aiPredictedBefore === "alpha" ? "α" : "ω"}
-                        </span>
-                      </span>
-                    ) : (
-                      <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">·</span>
-                    )}
-                    {/* Мета прогноз */}
-                    {r.metaPredictedBefore !== null ? (
-                      <span
-                        className="flex items-center gap-0.5 flex-shrink-0 px-1.5 py-0.5 rounded text-xs font-bold"
-                        style={{
-                          background: r.metaPredictionHit ? "rgba(251,191,36,0.12)" : "rgba(244,63,94,0.1)",
-                          border: `1px solid ${r.metaPredictionHit ? "rgba(251,191,36,0.35)" : "rgba(244,63,94,0.25)"}`,
-                          color: r.metaPredictionHit ? "#fbbf24" : "#f43f5e",
-                        }}
-                        title="Мета-консенсус"
-                      >
-                        {r.metaPredictionHit ? "✓" : "✗"}
-                        <span style={{ color: r.metaPredictedBefore === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                          {r.metaPredictedBefore === "alpha" ? "α" : "ω"}
-                        </span>
-                      </span>
-                    ) : (
-                      <span className="text-white/15 text-xs flex-shrink-0 w-10 text-center">·</span>
-                    )}
+
                     {i === 0 && (
                       <span className="text-neon-green animate-blink text-xs">▌</span>
                     )}
