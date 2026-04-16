@@ -3,6 +3,8 @@ import Icon from "@/components/ui/icon";
 import { analyzeFrame, computeFlickerStats, resetAnalyzerState, EVENT_COOLDOWN_MS } from "@/lib/screenAnalyzer";
 import { predict, getTopPatterns, getSignalDiagnostics } from "@/lib/mlPredictor";
 import type { SignalDiagnostic, Prediction, Pattern } from "@/lib/mlPredictor";
+import { predictByTime, getTimeAccuracy, getTimeSampleCount } from "@/lib/timePredictor";
+import type { TimePrediction } from "@/lib/timePredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 
 type Tab = "capture" | "model";
@@ -42,6 +44,9 @@ export default function Index() {
   const [history, setHistory] = useState<RoundResult[]>([]);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [signalDiagnostics, setSignalDiagnostics] = useState<SignalDiagnostic[]>([]);
+  const [timePrediction, setTimePrediction] = useState<TimePrediction | null>(null);
+  const [timeAccuracy, setTimeAccuracy] = useState<number | null>(null);
+  const [timeSamples, setTimeSamples] = useState<number>(0);
   const [lastFrame, setLastFrame] = useState<FrameAnalysis | null>(null);
   const [flickerSamples, setFlickerSamples] = useState<FlickerSample[]>([]);
   const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
@@ -271,6 +276,12 @@ export default function Index() {
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
           setSignalDiagnostics(getSignalDiagnostics());
+
+          // Тайм-предиктор (независимый)
+          const timePred = predictByTime(next);
+          setTimePrediction(timePred);
+          setTimeAccuracy(getTimeAccuracy());
+          setTimeSamples(getTimeSampleCount());
 
           return next;
         });
@@ -853,25 +864,116 @@ export default function Index() {
                   </div>
                 )}
 
-                {/* Детали time сигнала — если найден */}
-                {prediction.timeSignal && (
+                {/* Детали time сигнала и ω-серии */}
+                {(prediction.timeSignal || prediction.omegaStreak) && (
                   <div className="border-t px-5 py-2 flex flex-wrap gap-3" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                    <div className="flex items-center gap-1.5 font-mono text-xs">
-                      <span style={{ color: "#e879f9" }}>◆</span>
-                      <span className="text-white/30">
-                        период {prediction.timeSignal.periodMs}мс, окно {prediction.timeSignal.bucketIdx + 1}/4 →{" "}
-                        <span style={{ color: prediction.timeSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
-                          {prediction.timeSignal.reactor === "alpha" ? "α" : "ω"}
+                    {prediction.timeSignal && (
+                      <div className="flex items-center gap-1.5 font-mono text-xs">
+                        <span style={{ color: "#e879f9" }}>◆</span>
+                        <span className="text-white/30">
+                          период {prediction.timeSignal.periodMs}мс, окно {prediction.timeSignal.bucketIdx + 1}/4 →{" "}
+                          <span style={{ color: prediction.timeSignal.reactor === "alpha" ? "#22d3ee" : "#c084fc" }}>
+                            {prediction.timeSignal.reactor === "alpha" ? "α" : "ω"}
+                          </span>
+                          {" "}(n={prediction.timeSignal.sampleCount})
                         </span>
-                        {" "}(n={prediction.timeSignal.sampleCount})
-                      </span>
-                    </div>
+                      </div>
+                    )}
+                    {prediction.omegaStreak && prediction.omegaStreak.streakLen >= 5 && (
+                      <div className="flex items-center gap-1.5 font-mono text-xs">
+                        <span style={{ color: "#fb923c" }}>◆</span>
+                        <span className="text-white/30">
+                          серия <span style={{ color: "#c084fc" }}>ω×{prediction.omegaStreak.streakLen}</span>
+                          {" → "}<span style={{ color: "#22d3ee" }}>α</span>
+                          {" "}({Math.round(prediction.omegaStreak.confidence * 100)}%)
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
 
 
+
+          {/* ── ТАЙМ-ПРЕДИКТОР ── */}
+          {timePrediction && (
+            <div className="glass-card rounded-xl overflow-hidden border"
+              style={{ borderColor: "rgba(232,121,249,0.3)", background: "rgba(232,121,249,0.04)" }}>
+
+              {/* Заголовок */}
+              <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(232,121,249,0.12)" }}>
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-fuchsia-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-fuchsia-500"></span>
+                  </span>
+                  <span className="font-display text-xs tracking-widest uppercase" style={{ color: "#e879f9" }}>Анализ по времени</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  {timePrediction.consensusSignals > 1 && (
+                    <span className="font-mono text-xs px-2 py-0.5 rounded" style={{ background: "rgba(232,121,249,0.12)", color: "#e879f9", border: "1px solid rgba(232,121,249,0.25)" }}>
+                      {timePrediction.consensusSignals} сигнала
+                    </span>
+                  )}
+                  {timeAccuracy !== null && (
+                    <span className="font-mono text-xs" style={{ color: timeAccuracy >= 0.6 ? "#e879f9" : timeAccuracy >= 0.5 ? "#facc15" : "#f43f5e" }}>
+                      {Math.round(timeAccuracy * 100)}% (n={timeSamples})
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Прогноз */}
+              <div className="flex items-center justify-between px-5 py-4">
+                <div>
+                  <p className="font-mono text-xs text-white/25 uppercase tracking-widest mb-2">Прогноз по времени</p>
+                  <ReactorBadge reactor={timePrediction.reactor} size="lg" />
+                  <p className="font-mono text-xs mt-2 leading-relaxed" style={{ color: "rgba(232,121,249,0.6)" }}>
+                    {timePrediction.reason}
+                  </p>
+                </div>
+                <div className="text-center ml-4 flex-shrink-0">
+                  <p className="font-display text-4xl" style={{ color: "#e879f9", textShadow: "0 0 20px #e879f988" }}>
+                    {Math.round(timePrediction.confidence * 100)}%
+                  </p>
+                  <p className="font-mono text-xs text-white/25 mt-0.5">уверенность</p>
+                </div>
+              </div>
+
+              {/* Детали сигналов */}
+              <div className="px-5 pb-4 space-y-2">
+                {timePrediction.primarySignal && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs text-white/30">Цикл {timePrediction.primarySignal.periodMs}мс</span>
+                      <span className="font-mono text-xs font-bold" style={{ color: "#e879f9" }}>
+                        {timePrediction.primarySignal.reactor === "alpha" ? "→ α" : "→ ω"} · {Math.round(timePrediction.primarySignal.confidence * 100)}% · n={timePrediction.primarySignal.sampleCount}
+                      </span>
+                    </div>
+                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${timePrediction.primarySignal.confidence * 100}%`, background: "linear-gradient(90deg,#a855f7,#e879f9)" }} />
+                    </div>
+                  </div>
+                )}
+                {timePrediction.intervalSignal && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs text-white/30">Ритм ~{Math.round(timePrediction.intervalSignal.avgIntervalMs / 1000)}с</span>
+                      <span className="font-mono text-xs font-bold" style={{ color: "#c084fc" }}>
+                        {timePrediction.intervalSignal.expectedReactor === "alpha" ? "→ α" : "→ ω"} · {Math.round(timePrediction.intervalSignal.confidence * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${timePrediction.intervalSignal.confidence * 100}%`, background: "linear-gradient(90deg,#7c3aed,#c084fc)" }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           </div>
           </div> {/* конец левой колонки */}
@@ -892,24 +994,42 @@ export default function Index() {
                   <span className="text-white/40">{totalRounds} всего</span>
                 </div>
               </div>
-              {/* Точность прогнозов — ML */}
+              {/* Точность прогнозов — ML и Время */}
               {(() => {
                 const withML = history.filter(r => r.predictionHit !== null);
                 const mlHits = withML.filter(r => r.predictionHit).length;
                 const mlAcc = withML.length > 0 ? mlHits / withML.length : null;
 
-                return mlAcc !== null ? (
-                  <div>
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="font-mono text-xs text-white/25">Точность ML</span>
-                      <span className="font-mono text-xs font-bold" style={{ color: mlAcc >= 0.6 ? "#00ffcc" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
-                        {mlHits}/{withML.length} — {Math.round(mlAcc * 100)}%
-                      </span>
-                    </div>
-                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                      <div className="h-full rounded-full transition-all duration-700"
-                        style={{ width: `${mlAcc * 100}%`, background: mlAcc >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
-                    </div>
+                return mlAcc !== null || timeAccuracy !== null ? (
+                  <div className="space-y-1.5">
+                    {mlAcc !== null && (
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="font-mono text-xs text-white/25">ML</span>
+                          <span className="font-mono text-xs font-bold" style={{ color: mlAcc >= 0.6 ? "#00ffcc" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                            {mlHits}/{withML.length} — {Math.round(mlAcc * 100)}%
+                          </span>
+                        </div>
+                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${mlAcc * 100}%`, background: mlAcc >= 0.6 ? "linear-gradient(90deg,#00ffcc,#38bdf8)" : mlAcc >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                        </div>
+                      </div>
+                    )}
+                    {timeAccuracy !== null && (
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="font-mono text-xs" style={{ color: "rgba(232,121,249,0.5)" }}>Время</span>
+                          <span className="font-mono text-xs font-bold" style={{ color: timeAccuracy >= 0.6 ? "#e879f9" : timeAccuracy >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                            {timeSamples} — {Math.round(timeAccuracy * 100)}%
+                          </span>
+                        </div>
+                        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${timeAccuracy * 100}%`, background: timeAccuracy >= 0.6 ? "linear-gradient(90deg,#a855f7,#e879f9)" : timeAccuracy >= 0.4 ? "#facc15" : "#f43f5e" }} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="font-mono text-xs text-white/20">Точность появится после 2+ раундов</div>

@@ -40,6 +40,7 @@ export interface Prediction {
   signals: SignalBreakdown;
   timeSignal: TimeSignal | null;
   streakFlickerSignal: StreakFlickerSignal | null;
+  omegaStreak: OmegaStreakSignal | null;
 }
 
 export interface SignalBreakdown {
@@ -71,7 +72,7 @@ export interface StreakFlickerSignal {
 
 // ── Настройки ────────────────────────────────────────────
 
-const SEQ_LENGTHS = [5, 4, 3, 2];
+const SEQ_LENGTHS = [6, 5, 4, 3];
 const MIN_PATTERN_COUNT = 2;
 const RECENCY_WINDOW = 25;
 const BALANCE_PULL = 0.12;
@@ -376,6 +377,57 @@ export function findPatterns(history: Reactor[], minCount = MIN_PATTERN_COUNT): 
 
 
 
+// ── Специальный паттерн: ω×6→α (сброс счётчика) ──────────
+// Паттерн: 6 омег подряд → высокая вероятность альфы следующей.
+// Находит последнюю серию омег и проверяет, является ли она точным хвостом истории.
+
+export interface OmegaStreakSignal {
+  streakLen: number;    // текущая длина серии омег
+  reactor: Reactor;     // рекомендуемый следующий
+  confidence: number;
+  sinceReset: number;   // сколько раундов прошло с последнего "сброса" (альфы после серии ≥6)
+}
+
+function detectOmegaStreakPattern(history: Reactor[]): OmegaStreakSignal | null {
+  const valid = history.filter(r => r !== null) as ("alpha" | "omega")[];
+  if (valid.length < 4) return null;
+
+  // Считаем текущую серию омег с конца
+  let streakLen = 0;
+  for (let i = valid.length - 1; i >= 0; i--) {
+    if (valid[i] === "omega") streakLen++;
+    else break;
+  }
+
+  // Если сейчас серия ≥5 омег — ожидаем альфу
+  if (streakLen >= 5) {
+    // Уверенность растёт с длиной серии (5→60%, 6→75%, 7→85%, 8+→90%)
+    const confidence = Math.min(0.50 + (streakLen - 5) * 0.12, 0.90);
+    return { streakLen, reactor: "alpha", confidence, sinceReset: 0 };
+  }
+
+  // Ищем сколько раундов прошло после последнего "сброса" (серия ≥6 омег → следующая альфа)
+  let sinceReset = -1;
+  for (let i = valid.length - 1; i >= 6; i--) {
+    if (valid[i] === "alpha") {
+      // Проверяем: предшествовала ли ей серия ≥6 омег
+      let prevStreak = 0;
+      for (let j = i - 1; j >= 0; j--) {
+        if (valid[j] === "omega") prevStreak++;
+        else break;
+      }
+      if (prevStreak >= 6) {
+        sinceReset = valid.length - 1 - i;
+        break;
+      }
+    }
+  }
+
+  return sinceReset >= 0
+    ? { streakLen, reactor: null, confidence: 0, sinceReset }
+    : null;
+}
+
 // ── Базовый сигнал мерцания ───────────────────────────────
 
 // redness: R/(R+G) жёлтого сигнала. Чистый жёлтый ≈ 0.5, красноватый > 0.5, зеленоватый < 0.5
@@ -500,7 +552,7 @@ function flickerPatternBonus(
 
 // ── Детектор периодичности по времени ────────────────────
 
-function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): TimeSignal | null {
+export function detectTimePeriodicity(history: RoundResult[], nextTimestamp: number): TimeSignal | null {
   const n = history.length;
   if (n < 10) return null;
 
@@ -713,6 +765,7 @@ export function predict(
 
   const nextTimestamp = Date.now();
   const timeSignal = detectTimePeriodicity(history, nextTimestamp);
+  const omegaStreak = detectOmegaStreakPattern(reactorHistory);
   const flicker = flickerBaseSignal(flickerBias, flickerRate, history, flickerSwitchCount, flickerAlphaRedness, flickerOmegaRedness);
 
   let alphaScore = 0;
@@ -775,7 +828,14 @@ export function predict(
     reasonParts.push(`t%${timeSignal.periodMs}ms→${timeSignal.reactor === "alpha" ? "α" : "ω"}(${Math.round(timeSignal.confidence * 100)}%)×${timeMult.toFixed(1)}`);
   }
 
-  // ── 5. Комбо: история совместных предсказаний ──────────
+  // ── 5. Паттерн ω×N→α (сброс счётчика) ───────────────────
+  if (omegaStreak && omegaStreak.reactor === "alpha" && omegaStreak.confidence > 0) {
+    const streakW = omegaStreak.confidence * 0.70;
+    alphaScore += streakW;
+    reasonParts.push(`ω×${omegaStreak.streakLen}→α(${Math.round(omegaStreak.confidence * 100)}%)`);
+  }
+
+  // ── 6. Комбо: история совместных предсказаний ──────────
   const currentVotes: SignalVote = {
     pattern: bestPattern ? bestPattern.next : null,
     flicker: flicker.hint,
@@ -839,6 +899,7 @@ export function predict(
     signals,
     timeSignal,
     streakFlickerSignal: null,
+    omegaStreak,
   };
 }
 
