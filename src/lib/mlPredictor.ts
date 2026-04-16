@@ -441,11 +441,16 @@ function detectStreak(history: Reactor[]): { side: Reactor; length: number } {
 
 // ── Базовый сигнал мерцания ───────────────────────────────
 
+// redness: R/(R+G) жёлтого сигнала. Чистый жёлтый ≈ 0.5, красноватый > 0.5, зеленоватый < 0.5
+// Гипотеза: проигрывающий реактор светит более красноватым жёлтым → redness > 0.54 намекает на omega
+// Исторически подтверждаем: собираем средний redness победителя и проигравшего и сравниваем
 function flickerBaseSignal(
   flickerBias: number,
   flickerRate: number,
   history: RoundResult[],
-  flickerSwitchCount = 0
+  flickerSwitchCount = 0,
+  flickerAlphaRedness = 0.5,
+  flickerOmegaRedness = 0.5
 ): { hint: Reactor; weight: number; reason: string } {
   if (Math.abs(flickerBias) < 0.03 || flickerRate < 0.15) {
     return { hint: null, weight: 0, reason: "" };
@@ -457,7 +462,45 @@ function flickerBaseSignal(
   const switchBonus = Math.min(flickerSwitchCount / 10, 0.4);
   const weight = (rateWeight * biasWeight * 0.55) + switchBonus * 0.15;
 
+  // ── Сигнал красноватости: кто из реакторов светит теплее ──
+  // Разница redness между alpha и omega — дополнительный намёк
+  const rednessDiff = flickerAlphaRedness - flickerOmegaRedness;
+  // rednessDiff > 0 → alpha краснее → alpha вероятно проигрывает → omega
+  // rednessDiff < 0 → omega краснее → omega вероятно проигрывает → alpha
+  let rednessHint: Reactor = null;
+  let rednessW = 0;
+  if (Math.abs(rednessDiff) > 0.015) {
+    // Историческое подтверждение: собираем средний redness победителя
+    const withRedness = history.filter(r =>
+      r.flickerRate > 0.15 &&
+      (r.flickerAlphaRedness ?? 0.5) !== 0.5 &&
+      (r.flickerOmegaRedness ?? 0.5) !== 0.5
+    );
+    let rednessAccConf = 0.5;
+    if (withRedness.length >= 4) {
+      // Проверяем: когда alphaRedness > omegaRedness — кто побеждал?
+      const redAlphaHigher = withRedness.filter(r => (r.flickerAlphaRedness ?? 0.5) > (r.flickerOmegaRedness ?? 0.5));
+      const redAlphaHigherOmegaWon = redAlphaHigher.filter(r => r.winner === "omega").length;
+      if (redAlphaHigher.length >= 3) {
+        rednessAccConf = redAlphaHigherOmegaWon / redAlphaHigher.length;
+      }
+    }
+    // rednessAccConf: насколько часто "alpha краснее → omega выигрывает"
+    // Если подтверждения нет (≈0.5) — используем слабый базовый сигнал
+    const redConf = Math.abs(rednessAccConf - 0.5);
+    if (redConf > 0.05 || withRedness.length < 4) {
+      rednessHint = rednessDiff > 0
+        ? (rednessAccConf >= 0.5 ? "omega" : "alpha")
+        : (rednessAccConf >= 0.5 ? "alpha" : "omega");
+      rednessW = Math.min(Math.abs(rednessDiff) * 3.5, 0.3) * Math.max(redConf * 2, 0.3);
+    }
+  }
+
   const withFlicker = history.filter(r => r.flickerBias !== 0 && r.flickerRate > 0.15);
+  let finalHint = baseHint;
+  let finalWeight = weight;
+  let reasonExtra = `sw=${flickerSwitchCount}`;
+
   if (withFlicker.length >= 3) {
     const hits = withFlicker.filter(r => {
       const fp: Reactor = r.flickerBias > 0 ? "omega" : "alpha";
@@ -465,11 +508,23 @@ function flickerBaseSignal(
     }).length;
     const acc = hits / withFlicker.length;
     const multiplier = 0.4 + acc * 1.6;
-    const adj = Math.min(weight * multiplier, 0.62);
-    return { hint: baseHint, weight: adj, reason: `мерц. ${flickerRate.toFixed(1)}/с sw=${flickerSwitchCount} (точн. ${Math.round(acc * 100)}%)` };
+    finalWeight = Math.min(weight * multiplier, 0.62);
+    reasonExtra += ` точн.${Math.round(acc * 100)}%`;
   }
 
-  return { hint: baseHint, weight, reason: `мерц. ${flickerRate.toFixed(1)}/с sw=${flickerSwitchCount}` };
+  // Добавляем redness сигнал поверх
+  if (rednessHint !== null) {
+    if (rednessHint === finalHint) {
+      finalWeight = Math.min(finalWeight + rednessW, 0.72);
+    } else {
+      finalWeight = Math.max(finalWeight - rednessW * 0.5, 0);
+      if (rednessW > finalWeight) { finalHint = rednessHint; finalWeight = rednessW; }
+    }
+    const rLabel = Math.abs(rednessDiff) > 0 ? ` red=${rednessDiff > 0 ? "α+" : "ω+"}${Math.round(Math.abs(rednessDiff) * 100)}` : "";
+    reasonExtra += rLabel;
+  }
+
+  return { hint: finalHint, weight: finalWeight, reason: `мерц. ${flickerRate.toFixed(1)}/с ${reasonExtra}` };
 }
 
 // ── Сигнал взаимосвязи паттерн↔мерцание ─────────────────
@@ -711,7 +766,9 @@ export function predict(
   history: RoundResult[],
   flickerBias: number,
   flickerRate: number,
-  flickerSwitchCount = 0
+  flickerSwitchCount = 0,
+  flickerAlphaRedness = 0.5,
+  flickerOmegaRedness = 0.5
 ): Prediction {
   // Записываем точность сигналов предыдущего раунда
   if (history.length >= 1) {
@@ -830,7 +887,7 @@ export function predict(
   }
 
   // ── 4. Мерцание ────────────────────────────────────────
-  const flicker = flickerBaseSignal(flickerBias, flickerRate, history, flickerSwitchCount);
+  const flicker = flickerBaseSignal(flickerBias, flickerRate, history, flickerSwitchCount, flickerAlphaRedness, flickerOmegaRedness);
   if (flicker.hint) {
     if (flicker.hint === "alpha") alphaScore += flicker.weight;
     else omegaScore += flicker.weight;

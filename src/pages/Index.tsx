@@ -268,6 +268,8 @@ export default function Index() {
             dominant: frame.dominant,
             alphaLevel: frame.alphaSmooth,
             omegaLevel: frame.omegaSmooth,
+            alphaRedness: frame.alphaRedness,
+            omegaRedness: frame.omegaRedness,
             switchEvent,
           });
         }
@@ -287,7 +289,7 @@ export default function Index() {
 
         setHistory(prev => {
           // Прогноз классического ML до раунда
-          const prevPred = predict(prev, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
+          const prevPred = predict(prev, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, flickerStats.alphaRedness, flickerStats.omegaRedness);
           const predictedBefore = prevPred.reactor;
           const predictionHit = predictedBefore !== null ? predictedBefore === frame.winner : null;
           const mlConfidenceBefore = mlConfBeforeRef.current;
@@ -309,6 +311,8 @@ export default function Index() {
             flickerRate: flickerStats.rate,
             flickerSwitchCount: flickerStats.switchCount,
             flickerBias: flickerStats.bias,
+            flickerAlphaRedness: flickerStats.alphaRedness,
+            flickerOmegaRedness: flickerStats.omegaRedness,
             lastFlickerDominant: flickerStats.lastDominant,
             predictedBefore,
             predictionHit,
@@ -321,7 +325,7 @@ export default function Index() {
           };
 
           const next = [...prev, newResult];
-          const nextPred = predict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount);
+          const nextPred = predict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, flickerStats.alphaRedness, flickerStats.omegaRedness);
           mlConfBeforeRef.current = nextPred.confidence;
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
