@@ -9,7 +9,8 @@
  * 7.  Детектор зависимости от абсолютного времени (мс % T)
  * 8.  Автокорреляция на глубину (lag 2, 3, 4, 5) — связь через несколько шагов
  * 9.  Детектор чередования: насколько часто результат меняется vs повторяется
- * 10. Адаптация: скользящий вес по последним 20 раундам (не только <40%)
+ * 10. Детектор профиля мерцания серий: при серии из N одинаковых → сравниваем flickerRate/Bias/Switch с историческим профилем → предсказываем исход
+ * 11. Адаптация: скользящий вес по последним 20 раундам (не только <40%)
  */
 import type { Reactor, RoundResult } from "./screenAnalyzer";
 
@@ -40,6 +41,7 @@ export interface Prediction {
   signals: SignalBreakdown;
   modSignal: ModSignal | null;
   timeSignal: TimeSignal | null;
+  streakFlickerSignal: StreakFlickerSignal | null;
 }
 
 export interface SignalBreakdown {
@@ -53,6 +55,7 @@ export interface SignalBreakdown {
   timeScore: number;
   lagScore: number;
   alternationScore: number;
+  streakFlickerScore: number;
 }
 
 export interface ModSignal {
@@ -68,6 +71,15 @@ export interface TimeSignal {
   bucketIdx: number;
   reactor: Reactor;
   confidence: number;
+  sampleCount: number;
+}
+
+export interface StreakFlickerSignal {
+  streakSide: Reactor;
+  streakLen: number;
+  reactor: Reactor;
+  confidence: number;
+  similarity: number;
   sampleCount: number;
 }
 
@@ -121,19 +133,21 @@ interface SignalSnapshot {
   time: Reactor;
   lag: Reactor;
   alternation: Reactor;
+  streakFlicker: Reactor;
 }
 let prevSnapshot: SignalSnapshot | null = null;
 
 function updateSignalAccuracies(actual: Reactor) {
   if (!prevSnapshot || actual === null) return;
   const snap = prevSnapshot;
-  if (snap.pattern !== null)     recordSignalResult("pattern",     snap.pattern === actual);
-  if (snap.flicker !== null)     recordSignalResult("flicker",     snap.flicker === actual);
-  if (snap.streak !== null)      recordSignalResult("streak",      snap.streak === actual);
-  if (snap.mod !== null)         recordSignalResult("mod",         snap.mod === actual);
-  if (snap.time !== null)        recordSignalResult("time",        snap.time === actual);
-  if (snap.lag !== null)         recordSignalResult("lag",         snap.lag === actual);
-  if (snap.alternation !== null) recordSignalResult("alternation", snap.alternation === actual);
+  if (snap.pattern !== null)      recordSignalResult("pattern",      snap.pattern === actual);
+  if (snap.flicker !== null)      recordSignalResult("flicker",      snap.flicker === actual);
+  if (snap.streak !== null)       recordSignalResult("streak",       snap.streak === actual);
+  if (snap.mod !== null)          recordSignalResult("mod",          snap.mod === actual);
+  if (snap.time !== null)         recordSignalResult("time",         snap.time === actual);
+  if (snap.lag !== null)          recordSignalResult("lag",          snap.lag === actual);
+  if (snap.alternation !== null)  recordSignalResult("alternation",  snap.alternation === actual);
+  if (snap.streakFlicker !== null) recordSignalResult("streakFlicker", snap.streakFlicker === actual);
 }
 
 // ── Публичная диагностика сигналов ───────────────────────
@@ -148,13 +162,14 @@ export interface SignalDiagnostic {
 
 export function getSignalDiagnostics(): SignalDiagnostic[] {
   return [
-    { key: "pattern",     label: "Паттерн",    color: "#00ffcc" },
-    { key: "flicker",     label: "Мерцание",   color: "#facc15" },
-    { key: "streak",      label: "Серия",      color: "#a855f7" },
-    { key: "mod",         label: "Шаг (mod)",  color: "#f472b6" },
-    { key: "time",        label: "Время",      color: "#e879f9" },
-    { key: "lag",         label: "Lag-корр.",  color: "#67e8f9" },
-    { key: "alternation", label: "Чередов.",   color: "#86efac" },
+    { key: "pattern",      label: "Паттерн",      color: "#00ffcc" },
+    { key: "flicker",      label: "Мерцание",     color: "#facc15" },
+    { key: "streak",       label: "Серия",        color: "#a855f7" },
+    { key: "streakFlicker", label: "Мерц.серии",  color: "#fb923c" },
+    { key: "mod",          label: "Шаг (mod)",    color: "#f472b6" },
+    { key: "time",         label: "Время",        color: "#e879f9" },
+    { key: "lag",          label: "Lag-корр.",    color: "#67e8f9" },
+    { key: "alternation",  label: "Чередов.",     color: "#86efac" },
   ].map(s => ({
     ...s,
     accuracy: signalAccuracy(s.key),
@@ -210,6 +225,122 @@ function buildFlickerProfiles(history: RoundResult[]): Map<string, FlickerProfil
     });
   });
   return result;
+}
+
+// ── Профили мерцания серий ────────────────────────────────
+// Для каждой комбинации (side, length, outcome) запоминаем средний профиль мерцания
+// "Когда идёт серия из 4 омег и реактор мерцает вот так → следующий обычно X"
+
+interface StreakFlickerEntry {
+  rates: number[];
+  biases: number[];
+  switches: number[];
+  outcome: Reactor;
+}
+
+function buildStreakFlickerProfiles(
+  history: RoundResult[]
+): Map<string, StreakFlickerEntry[]> {
+  // key = `${side}_${len}` → массив исходов с профилями мерцания
+  const map: Map<string, StreakFlickerEntry[]> = new Map();
+
+  for (let i = 1; i < history.length; i++) {
+    const cur = history[i - 1];
+    const next = history[i];
+    if (!cur.winner || !next.winner) continue;
+
+    // Считаем длину серии, заканчивающейся на i-1
+    let len = 1;
+    for (let j = i - 2; j >= 0; j--) {
+      if (history[j].winner === cur.winner) len++;
+      else break;
+    }
+    if (len < 2) continue;
+
+    const key = `${cur.winner}_${len}`;
+    if (!map.has(key)) {
+      map.set(key, [
+        { rates: [], biases: [], switches: [], outcome: "alpha" },
+        { rates: [], biases: [], switches: [], outcome: "omega" },
+      ]);
+    }
+    const entries = map.get(key)!;
+    const entry = entries.find(e => e.outcome === next.winner)!;
+    entry.rates.push(cur.flickerRate);
+    entry.biases.push(cur.flickerBias);
+    entry.switches.push(cur.flickerSwitchCount ?? 0);
+  }
+
+  return map;
+}
+
+function detectStreakFlickerSignal(
+  history: RoundResult[],
+  currentFlickerRate: number,
+  currentFlickerBias: number,
+  currentFlickerSwitchCount: number
+): StreakFlickerSignal | null {
+  const n = history.length;
+  if (n < 8) return null;
+
+  // Определяем текущую серию
+  const valid = history.filter(r => r.winner !== null);
+  if (valid.length < 3) return null;
+  const last = valid[valid.length - 1];
+  let streakLen = 1;
+  for (let i = valid.length - 2; i >= 0; i--) {
+    if (valid[i].winner === last.winner) streakLen++;
+    else break;
+  }
+  if (streakLen < 2) return null;
+
+  const profiles = buildStreakFlickerProfiles(history.slice(0, -1));
+
+  // Ищем профиль для текущей серии (и более коротких, если нет данных)
+  for (let tryLen = streakLen; tryLen >= 2; tryLen--) {
+    const key = `${last.winner}_${tryLen}`;
+    const entries = profiles.get(key);
+    if (!entries) continue;
+
+    const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+    const scored: { outcome: Reactor; similarity: number; sampleCount: number }[] = [];
+    for (const entry of entries) {
+      const n = entry.rates.length;
+      if (n < 2) continue;
+      const avgRate = avg(entry.rates);
+      const avgBias = avg(entry.biases);
+      const avgSwitch = avg(entry.switches);
+
+      const rateSim = Math.max(0, 1 - Math.abs(currentFlickerRate - avgRate) / 2);
+      const biasSim = Math.max(0, 1 - Math.abs(currentFlickerBias - avgBias) / 0.35);
+      const switchSim = Math.max(0, 1 - Math.abs(currentFlickerSwitchCount - avgSwitch) / 4);
+      const similarity = rateSim * 0.25 + biasSim * 0.25 + switchSim * 0.5;
+
+      scored.push({ outcome: entry.outcome, similarity, sampleCount: n });
+    }
+
+    if (scored.length < 2) continue;
+
+    const [a, b] = scored.sort((x, y) => y.similarity - x.similarity);
+    const diff = a.similarity - b.similarity;
+    if (diff < 0.12) continue;
+
+    const totalSamples = scored.reduce((s, e) => s + e.sampleCount, 0);
+    const confidence = Math.min(diff * 2.2, 0.82) * Math.min(totalSamples / 10, 1);
+    if (confidence < 0.12) continue;
+
+    return {
+      streakSide: last.winner,
+      streakLen,
+      reactor: a.outcome,
+      confidence,
+      similarity: a.similarity,
+      sampleCount: totalSamples,
+    };
+  }
+
+  return null;
 }
 
 // ── Поиск паттернов с весами давности ────────────────────
@@ -624,13 +755,14 @@ export function predict(
   const timeSignal = detectTimePeriodicity(history, nextTimestamp);
   const lagSignal = detectLagCorrelations(reactorHistory);
   const alternation = detectAlternation(reactorHistory);
+  const streakFlickerSignal = detectStreakFlickerSignal(history, flickerRate, flickerBias, flickerSwitchCount);
 
   let alphaScore = 0;
   let omegaScore = 0;
   const signals: SignalBreakdown = {
     patternScore: 0, flickerScore: 0, flickerPatternScore: 0,
     balanceScore: 0, streakScore: 0, adaptScore: 0,
-    modScore: 0, timeScore: 0, lagScore: 0, alternationScore: 0,
+    modScore: 0, timeScore: 0, lagScore: 0, alternationScore: 0, streakFlickerScore: 0,
   };
   const reasonParts: string[] = [];
 
@@ -746,7 +878,19 @@ export function predict(
     reasonParts.push(`чередование→${alternation.signal === "alpha" ? "α" : "ω"}`);
   }
 
-  // ── 9. Адаптация: скользящий вес по последним 20 ──────
+  // ── 9. Мерцание серии ─────────────────────────────────
+  if (streakFlickerSignal) {
+    const sfMult = signalMultiplier("streakFlicker");
+    const sfW = streakFlickerSignal.confidence * 0.38 * sfMult;
+    if (streakFlickerSignal.reactor === "alpha") alphaScore += sfW;
+    else omegaScore += sfW;
+    signals.streakFlickerScore = sfW;
+    const sideLabel = streakFlickerSignal.streakSide === "alpha" ? "α" : "ω";
+    const outLabel = streakFlickerSignal.reactor === "alpha" ? "α" : "ω";
+    reasonParts.push(`мерц.серии ${sideLabel}×${streakFlickerSignal.streakLen}→${outLabel}(sim=${Math.round(streakFlickerSignal.similarity * 100)}%,n=${streakFlickerSignal.sampleCount})`);
+  }
+
+  // ── 10. Адаптация: скользящий вес по последним 20 ──────
   const recent = history.slice(-20);
   const recentWithPred = recent.filter(r => r.predictionHit !== null);
   if (recentWithPred.length >= 5) {
@@ -777,13 +921,14 @@ export function predict(
 
   // Сохраняем снапшот что предсказывал каждый сигнал в этом раунде
   prevSnapshot = {
-    pattern:     bestPattern ? bestPattern.next : null,
-    flicker:     flicker.hint,
-    streak:      streakPrediction,
-    mod:         modSignal ? modSignal.reactor : null,
-    time:        timeSignal ? timeSignal.reactor : null,
-    lag:         lagSignal ? lagSignal.reactor : null,
-    alternation: alternation ? alternation.signal : null,
+    pattern:      bestPattern ? bestPattern.next : null,
+    flicker:      flicker.hint,
+    streak:       streakPrediction,
+    mod:          modSignal ? modSignal.reactor : null,
+    time:         timeSignal ? timeSignal.reactor : null,
+    lag:          lagSignal ? lagSignal.reactor : null,
+    alternation:  alternation ? alternation.signal : null,
+    streakFlicker: streakFlickerSignal ? streakFlickerSignal.reactor : null,
   };
 
   return {
@@ -795,6 +940,7 @@ export function predict(
     signals,
     modSignal,
     timeSignal,
+    streakFlickerSignal,
   };
 }
 
