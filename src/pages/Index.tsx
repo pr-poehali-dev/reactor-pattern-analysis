@@ -1337,12 +1337,53 @@ export default function Index() {
                   <Icon name="Clock" size={13} className="text-neon-green" />
                   <span className="font-display text-xs tracking-widest text-neon-green/80 uppercase">История событий</span>
                 </div>
-                <div className="flex items-center gap-2 font-mono text-xs">
-                  <span className="text-cyan-400">α {alphaWins}</span>
-                  <span className="text-white/20">·</span>
-                  <span className="text-purple-400">ω {omegaWins}</span>
-                  <span className="text-white/20">·</span>
-                  <span className="text-white/40">{totalRounds} всего</span>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 font-mono text-xs">
+                    <span className="text-cyan-400">α {alphaWins}</span>
+                    <span className="text-white/20">·</span>
+                    <span className="text-purple-400">ω {omegaWins}</span>
+                    <span className="text-white/20">·</span>
+                    <span className="text-white/40">{totalRounds} всего</span>
+                  </div>
+                  {totalRounds > 0 && (
+                    <button
+                      onClick={() => {
+                        const rows = [
+                          ["#", "Время", "Победитель", "Темп мерц.", "Смещение мерц.", "Переключений", "Прогноз ML", "ML верно", "Увер. ML %", "Прогноз ИИ", "ИИ верно", "Увер. ИИ %", "Прогноз Мета", "Мета верно"],
+                          ...history.map(r => [
+                            r.id,
+                            new Date(r.timestamp).toLocaleString("ru-RU"),
+                            r.winner === "alpha" ? "Альфа" : "Омега",
+                            r.flickerRate.toFixed(2),
+                            r.flickerBias.toFixed(3),
+                            r.flickerSwitchCount,
+                            r.predictedBefore === "alpha" ? "Альфа" : r.predictedBefore === "omega" ? "Омега" : "",
+                            r.predictionHit === true ? "Да" : r.predictionHit === false ? "Нет" : "",
+                            r.mlConfidenceBefore ? Math.round(r.mlConfidenceBefore * 100) : "",
+                            r.aiPredictedBefore === "alpha" ? "Альфа" : r.aiPredictedBefore === "omega" ? "Омега" : "",
+                            r.aiPredictionHit === true ? "Да" : r.aiPredictionHit === false ? "Нет" : "",
+                            r.aiConfidenceBefore ? Math.round(r.aiConfidenceBefore * 100) : "",
+                            r.metaPredictedBefore === "alpha" ? "Альфа" : r.metaPredictedBefore === "omega" ? "Омега" : "",
+                            r.metaPredictionHit === true ? "Да" : r.metaPredictionHit === false ? "Нет" : "",
+                          ])
+                        ];
+                        const csv = "\uFEFF" + rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(";")).join("\n");
+                        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `history_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.csv`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="flex items-center gap-1.5 font-mono text-xs px-2.5 py-1.5 rounded-lg transition-all hover:opacity-80"
+                      style={{ background: "rgba(0,255,204,0.08)", color: "#00ffcc", border: "1px solid rgba(0,255,204,0.2)" }}
+                      title="Скачать историю в Excel/CSV"
+                    >
+                      <Icon name="Download" size={11} />
+                      Excel
+                    </button>
+                  )}
                 </div>
               </div>
               {/* Точность прогнозов — ML, ИИ и Мета */}
