@@ -38,8 +38,11 @@ export interface EnsemblePrediction {
   confusionMatrix: ConfusionMatrix;
   featureImportance: FeatureImportance[];
   accuracyByClass: { alpha: number | null; omega: number | null };
+  precisionByClass: { alpha: number | null; omega: number | null };
+  recallByClass: { alpha: number | null; omega: number | null };
   recentAccuracyCurve: number[]; // точность по блокам по 10 раундов
   accuracy: number | null; // общая точность ансамбля
+  omegaPenaltyActive: boolean; // штраф ×2 за ошибку на Омегу
 }
 
 export interface ConfusionMatrix {
@@ -66,6 +69,7 @@ interface Features {
   streakLen: number;   // длина текущей серии
   streakAlpha: number; // 1 если серия alpha
   alphaRatio10: number; // доля alpha за последние 10
+  omegaRatio20: number; // доля omega за последние 20 (п.5)
   altRate: number;     // частота чередования за 8 раундов
   roundNum: number;    // номер раунда (нормировано /100)
   timeSinceSwitch: number; // сколько раундов с последней смены (нормировано /10)
@@ -111,6 +115,12 @@ function extractFeatures(
     ? last10.filter(r => r.winner === "alpha").length / last10.length
     : 0.5;
 
+  // Доля omega за последние 20 раундов (п.5)
+  const last20 = history.slice(-20);
+  const omegaRatio20 = last20.length > 0
+    ? last20.filter(r => r.winner === "omega").length / last20.length
+    : 0.5;
+
   // Чередование за 8
   let alternations = 0;
   for (let i = 1; i < Math.min(n, 8); i++) {
@@ -147,6 +157,7 @@ function extractFeatures(
     streakLen: Math.min(streakLen, 10) / 10,
     streakAlpha,
     alphaRatio10,
+    omegaRatio20,
     altRate,
     roundNum: Math.min(n, 100) / 100,
     timeSinceSwitch: Math.min(timeSinceSwitch, 10) / 10,
@@ -163,7 +174,7 @@ function extractFeatures(
 function featuresToArray(f: Features): number[] {
   return [
     f.last1, f.last2, f.last3, f.last4,
-    f.streakLen, f.streakAlpha, f.alphaRatio10, f.altRate,
+    f.streakLen, f.streakAlpha, f.alphaRatio10, f.omegaRatio20, f.altRate,
     f.roundNum, f.timeSinceSwitch,
     f.flickerRate, f.flickerBias, f.flickerRateDelta, f.flickerRateMA3, f.flickerBin,
     f.pattern0110, f.pattern1001,
@@ -178,6 +189,7 @@ const FEATURE_LABELS: { name: keyof Features; label: string }[] = [
   { name: "streakLen", label: "Длина серии" },
   { name: "streakAlpha", label: "Серия на Alpha" },
   { name: "alphaRatio10", label: "Доля Alpha / 10 раундов" },
+  { name: "omegaRatio20", label: "Доля Omega / 20 раундов" },
   { name: "altRate", label: "Частота чередования" },
   { name: "roundNum", label: "Номер раунда" },
   { name: "timeSinceSwitch", label: "Раундов без смены" },
@@ -259,7 +271,8 @@ function lzSuffixPredict(history: RoundResult[]): { prob: number } {
   if (n < 3) return { prob: 0.5 };
 
   // Ищем самое длинное совпадение суффикса истории с любым ранним отрезком
-  for (let matchLen = Math.min(n - 1, 20); matchLen >= 1; matchLen--) {
+  // Ограничиваем окно до 7 чтобы снизить переобучение на Альфа (п.3)
+  for (let matchLen = Math.min(n - 1, 7); matchLen >= 1; matchLen--) {
     const suffix = winners.slice(-matchLen);
     let alphaCount = 0;
     let omegaCount = 0;
@@ -295,18 +308,31 @@ interface TreeNode {
   value: number | null; // вероятность alpha в листе
 }
 
+// class_weight='balanced': вес класса = N / (2 * count_class) (п.2)
+function computeSampleWeights(y: number[]): number[] {
+  const n = y.length;
+  const alphaCount = y.reduce((s, v) => s + v, 0);
+  const omegaCount = n - alphaCount;
+  const wAlpha = omegaCount > 0 ? n / (2 * alphaCount || 1) : 1;
+  const wOmega  = alphaCount > 0 ? n / (2 * omegaCount || 1) : 1;
+  return y.map(v => v === 1 ? wAlpha : wOmega);
+}
+
 function buildDecisionTree(
   X: number[][],
   y: number[], // 1=alpha, 0=omega
   maxDepth: number,
   minSamples: number,
-  featureSubset?: number[] // для Random Forest
+  featureSubset?: number[], // для Random Forest
+  sampleWeights?: number[]  // для балансировки классов (п.2)
 ): TreeNode {
   const n = X.length;
   if (n === 0) return { featureIdx: 0, threshold: 0, left: null, right: null, value: 0.5 };
 
-  const alphaSum = y.reduce((s, v) => s + v, 0);
-  const leafValue = alphaSum / n;
+  const W = sampleWeights ?? new Array(n).fill(1);
+  const totalW = W.reduce((a, b) => a + b, 0);
+  const alphaW = y.reduce((s, v, i) => s + v * W[i], 0);
+  const leafValue = totalW > 0 ? alphaW / totalW : 0.5;
 
   if (maxDepth === 0 || n <= minSamples) {
     return { featureIdx: 0, threshold: 0, left: null, right: null, value: leafValue };
@@ -319,25 +345,32 @@ function buildDecisionTree(
   let bestFeat = 0;
   let bestThresh = 0;
 
-  const gini = (subset: number[]): number => {
-    if (subset.length === 0) return 0;
-    const p = subset.reduce((s, v) => s + v, 0) / subset.length;
+  const giniW = (idxs: number[]): number => {
+    if (idxs.length === 0) return 0;
+    const tw = idxs.reduce((s, i) => s + W[i], 0);
+    if (tw === 0) return 0;
+    const p = idxs.reduce((s, i) => s + y[i] * W[i], 0) / tw;
     return 2 * p * (1 - p);
   };
+
+  const allIdxs = Array.from({ length: n }, (_, i) => i);
+  const parentGini = giniW(allIdxs);
 
   for (const fi of candidates) {
     const values = X.map(x => x[fi]);
     const sorted = [...new Set(values)].sort((a, b) => a - b);
     for (let ti = 0; ti < sorted.length - 1; ti++) {
       const thresh = (sorted[ti] + sorted[ti + 1]) / 2;
-      const leftY: number[] = [];
-      const rightY: number[] = [];
+      const leftIdx: number[] = [];
+      const rightIdx: number[] = [];
       for (let i = 0; i < n; i++) {
-        if (X[i][fi] <= thresh) leftY.push(y[i]);
-        else rightY.push(y[i]);
+        if (X[i][fi] <= thresh) leftIdx.push(i);
+        else rightIdx.push(i);
       }
-      if (leftY.length === 0 || rightY.length === 0) continue;
-      const gain = gini(y) - (leftY.length / n) * gini(leftY) - (rightY.length / n) * gini(rightY);
+      if (leftIdx.length === 0 || rightIdx.length === 0) continue;
+      const wL = leftIdx.reduce((s, i) => s + W[i], 0);
+      const wR = rightIdx.reduce((s, i) => s + W[i], 0);
+      const gain = parentGini - (wL / totalW) * giniW(leftIdx) - (wR / totalW) * giniW(rightIdx);
       if (gain > bestGain) { bestGain = gain; bestFeat = fi; bestThresh = thresh; }
     }
   }
@@ -346,11 +379,11 @@ function buildDecisionTree(
     return { featureIdx: 0, threshold: 0, left: null, right: null, value: leafValue };
   }
 
-  const leftX: number[][] = []; const leftY: number[] = [];
-  const rightX: number[][] = []; const rightY: number[] = [];
+  const leftX: number[][] = []; const leftY: number[] = []; const leftW: number[] = [];
+  const rightX: number[][] = []; const rightY: number[] = []; const rightW: number[] = [];
   for (let i = 0; i < n; i++) {
-    if (X[i][bestFeat] <= bestThresh) { leftX.push(X[i]); leftY.push(y[i]); }
-    else { rightX.push(X[i]); rightY.push(y[i]); }
+    if (X[i][bestFeat] <= bestThresh) { leftX.push(X[i]); leftY.push(y[i]); leftW.push(W[i]); }
+    else { rightX.push(X[i]); rightY.push(y[i]); rightW.push(W[i]); }
   }
 
   // Вычисляем subset для следующего уровня (RF: sqrt признаков)
@@ -361,8 +394,8 @@ function buildDecisionTree(
   return {
     featureIdx: bestFeat,
     threshold: bestThresh,
-    left: buildDecisionTree(leftX, leftY, maxDepth - 1, minSamples, nextSubset),
-    right: buildDecisionTree(rightX, rightY, maxDepth - 1, minSamples, nextSubset),
+    left: buildDecisionTree(leftX, leftY, maxDepth - 1, minSamples, nextSubset, leftW),
+    right: buildDecisionTree(rightX, rightY, maxDepth - 1, minSamples, nextSubset, rightW),
     value: null,
   };
 }
@@ -411,13 +444,15 @@ function buildRandomForest(X: number[][], y: number[], nTrees = 20): RandomFores
   const nFeatures = X[0]?.length ?? 0;
   const trees: TreeNode[] = [];
   const importances: number[] = new Array(nFeatures).fill(0);
+  const baseWeights = computeSampleWeights(y); // class_weight='balanced' (п.2)
 
   for (let t = 0; t < nTrees; t++) {
     const indices = bootstrapSample(X.length);
     const bX = indices.map(i => X[i]);
     const bY = indices.map(i => y[i]);
+    const bW = indices.map(i => baseWeights[i]);
     const subset = sampleFeatures(nFeatures, Math.max(2, Math.floor(Math.sqrt(nFeatures))));
-    const tree = buildDecisionTree(bX, bY, 5, 2, subset);
+    const tree = buildDecisionTree(bX, bY, 5, 2, subset, bW);
     trees.push(tree);
 
     // Важность признаков: считаем сколько раз каждый признак использовался в сплите
@@ -457,15 +492,17 @@ const gbmCache: { model: GBM | null; trainedOnN: number } = {
 function buildGBM(X: number[][], y: number[], nTrees = 15, lr = 0.15): GBM {
   _seed = 137;
   const n = X.length;
-  const initProb = y.reduce((a, b) => a + b, 0) / n;
+  const W = computeSampleWeights(y); // class_weight='balanced' (п.2)
+  const totalW = W.reduce((a, b) => a + b, 0);
+  const initProb = totalW > 0 ? y.reduce((s, v, i) => s + v * W[i], 0) / totalW : 0.5;
 
-  // Инициализируем остатки
+  // Инициализируем остатки (взвешенные)
   let residuals = y.map(yi => yi - initProb);
   const trees: TreeNode[] = [];
 
   for (let t = 0; t < nTrees; t++) {
-    // Обучаем дерево на остатках
-    const tree = buildDecisionTree(X, residuals, 3, 2);
+    // Обучаем дерево на остатках с весами классов
+    const tree = buildDecisionTree(X, residuals, 3, 2, undefined, W);
     trees.push(tree);
 
     // Обновляем остатки
@@ -583,12 +620,15 @@ function recordMethodResult(key: MethodKey, hit: boolean) {
 }
 
 // Валидационные веса: точность на последних 20% истории (но минимум 8 раундов)
+// LZ максимально ограничен до 0.2 (п.4)
+const LZ_MAX_WEIGHT = 0.2;
+
 function getEnsembleWeights(history: RoundResult[]): Record<MethodKey, number> {
   const n = history.length;
   const valSize = Math.max(8, Math.floor(n * 0.2));
 
   const weights: Record<MethodKey, number> = {
-    markov: 1, lz: 1, rf: 1, gbm: 1, knn: 1,
+    markov: 1, lz: LZ_MAX_WEIGHT, rf: 1, gbm: 1, knn: 1,
   };
 
   if (n < 12) return weights;
@@ -599,7 +639,9 @@ function getEnsembleWeights(history: RoundResult[]): Record<MethodKey, number> {
     const recent = hist.slice(-valSize);
     const acc = recent.filter(Boolean).length / recent.length;
     // acc=50% → weight=0.5, acc=70% → weight=1.5, acc<40% → weight≈0.1
-    weights[key] = Math.max(0.05, acc < 0.40 ? (acc - 0.30) : 0.5 + (acc - 0.5) * 2);
+    const computed = Math.max(0.05, acc < 0.40 ? (acc - 0.30) : 0.5 + (acc - 0.5) * 2);
+    // LZ не может превысить LZ_MAX_WEIGHT (п.4)
+    weights[key] = key === "lz" ? Math.min(LZ_MAX_WEIGHT, computed) : computed;
   }
 
   return weights;
@@ -769,7 +811,18 @@ export function ensemblePredict(
   }
 
   const ensembleProb = totalWeight > 0 ? alphaScore / totalWeight : 0.5;
-  const reactor: Reactor = ensembleProb >= 0.5 ? "alpha" : "omega";
+
+  // Применяем смещённый порог если активен штраф Омега (п.6)
+  // Вычисляем порог ДО диагностики, поэтому берём омегаRecall из предыдущего шага
+  // (в первых раундах — стандартный порог)
+  const prevCm = buildConfusionMatrix(history);
+  const _omegaActualPrev = prevCm.omegaOmega + prevCm.alphaOmega;
+  const _omegaRecallPrev = _omegaActualPrev > 0 ? prevCm.omegaOmega / _omegaActualPrev : null;
+  const _penaltyNow = _omegaRecallPrev !== null && _omegaRecallPrev < 0.4
+    && history.filter(r => r.predictionHit !== null).length >= 10;
+  const _threshold = _penaltyNow ? 0.42 : 0.5;
+
+  const reactor: Reactor = ensembleProb >= _threshold ? "alpha" : "omega";
   const rawConf = Math.max(ensembleProb, 1 - ensembleProb);
   const confidence = Math.min(0.93, 0.5 + (rawConf - 0.5) * 1.6);
 
@@ -791,12 +844,30 @@ export function ensemblePredict(
   const totalHits = history.filter(r => r.predictionHit === true).length;
   const accuracy = totalPredicted >= 5 ? totalHits / totalPredicted : null;
 
-  const alphaPred = cm.alphaAlpha + cm.alphaOmega;
-  const omegaPred = cm.omegaAlpha + cm.omegaOmega;
-  const accuracyByClass = {
+  // Precision = TP / (TP + FP) — из всех, кого предсказали классом X, сколько верных
+  const alphaPred = cm.alphaAlpha + cm.alphaOmega; // предсказано alpha
+  const omegaPred = cm.omegaAlpha + cm.omegaOmega; // предсказано omega
+  // Recall = TP / (TP + FN) — из всех реальных X, сколько поймали
+  const alphaActual = cm.alphaAlpha + cm.omegaAlpha; // фактически alpha
+  const omegaActual = cm.omegaOmega + cm.alphaOmega; // фактически omega
+
+  const precisionByClass = {
     alpha: alphaPred > 0 ? cm.alphaAlpha / alphaPred : null,
     omega: omegaPred > 0 ? cm.omegaOmega / omegaPred : null,
   };
+  const recallByClass = {
+    alpha: alphaActual > 0 ? cm.alphaAlpha / alphaActual : null,
+    omega: omegaActual > 0 ? cm.omegaOmega / omegaActual : null,
+  };
+  // Для совместимости с UI accuracyByClass = precision
+  const accuracyByClass = precisionByClass;
+
+  // п.6: если recall по Омега < 0.4 — смещаем порог вниз (штраф за ошибку на Омега ×2)
+  // Реализуется как сдвиг порога: вместо 0.5 используем 0.5 - penaltyShift
+  // что равнозначно увеличению стоимости ошибки FN(Omega) в 2 раза
+  const omegaRecall = recallByClass.omega;
+  const omegaPenaltyActive = omegaRecall !== null && omegaRecall < 0.4 && totalPredicted >= 10;
+  const threshold = omegaPenaltyActive ? 0.42 : 0.5; // сдвигаем порог → больше предсказаний Omega
 
   // Важность признаков из RF
   const featureImportance: FeatureImportance[] = rfCache.forest
@@ -836,8 +907,11 @@ export function ensemblePredict(
     confusionMatrix: cm,
     featureImportance,
     accuracyByClass,
+    precisionByClass,
+    recallByClass,
     recentAccuracyCurve: accuracyCurve,
     accuracy,
+    omegaPenaltyActive,
   };
 
   lastEnsemblePrediction = result;

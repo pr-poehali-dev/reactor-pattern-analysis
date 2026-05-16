@@ -948,7 +948,14 @@ export default function Index() {
 
                 {/* Диагностика */}
                 <div className="px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
-                  <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>МАТРИЦА ОШИБОК</p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="font-mono text-white/20" style={{ fontSize: 9, letterSpacing: "0.1em" }}>МАТРИЦА ОШИБОК</p>
+                    {ensemblePred.omegaPenaltyActive && (
+                      <span className="font-mono px-1.5 py-0.5 rounded" style={{ fontSize: 8, background: "rgba(251,191,36,0.12)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)" }}>
+                        ⚡ штраф ω ×2
+                      </span>
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 gap-1 font-mono" style={{ fontSize: 9 }}>
                     <div className="text-center px-2 py-1 rounded" style={{ background: "rgba(34,211,238,0.08)", color: "#22d3ee" }}>
                       α→α ✓ {ensemblePred.confusionMatrix.alphaAlpha}
@@ -963,14 +970,35 @@ export default function Index() {
                       ω→ω ✓ {ensemblePred.confusionMatrix.omegaOmega}
                     </div>
                   </div>
-                  {(ensemblePred.accuracyByClass.alpha !== null || ensemblePred.accuracyByClass.omega !== null) && (
-                    <div className="flex gap-4 mt-2 font-mono" style={{ fontSize: 9 }}>
-                      {ensemblePred.accuracyByClass.alpha !== null && (
-                        <span style={{ color: "#22d3ee" }}>α: {Math.round(ensemblePred.accuracyByClass.alpha * 100)}%</span>
-                      )}
-                      {ensemblePred.accuracyByClass.omega !== null && (
-                        <span style={{ color: "#c084fc" }}>ω: {Math.round(ensemblePred.accuracyByClass.omega * 100)}%</span>
-                      )}
+
+                  {/* Precision / Recall по классам */}
+                  {(ensemblePred.precisionByClass.alpha !== null || ensemblePred.recallByClass.omega !== null) && (
+                    <div className="mt-2 space-y-1">
+                      <div className="grid grid-cols-3 gap-1 font-mono text-center" style={{ fontSize: 8, color: "rgba(255,255,255,0.2)" }}>
+                        <span>класс</span><span>precision</span><span>recall</span>
+                      </div>
+                      {/* Альфа */}
+                      <div className="grid grid-cols-3 gap-1 font-mono text-center" style={{ fontSize: 9 }}>
+                        <span style={{ color: "#22d3ee" }}>α Альфа</span>
+                        <span style={{ color: ensemblePred.precisionByClass.alpha !== null && ensemblePred.precisionByClass.alpha >= 0.6 ? "#22d3ee" : "#f43f5e" }}>
+                          {ensemblePred.precisionByClass.alpha !== null ? `${Math.round(ensemblePred.precisionByClass.alpha * 100)}%` : "—"}
+                        </span>
+                        <span style={{ color: ensemblePred.recallByClass.alpha !== null && ensemblePred.recallByClass.alpha >= 0.5 ? "#22d3ee" : "#facc15" }}>
+                          {ensemblePred.recallByClass.alpha !== null ? `${Math.round(ensemblePred.recallByClass.alpha * 100)}%` : "—"}
+                        </span>
+                      </div>
+                      {/* Омега */}
+                      <div className="grid grid-cols-3 gap-1 font-mono text-center" style={{ fontSize: 9 }}>
+                        <span style={{ color: "#c084fc" }}>ω Омега</span>
+                        <span style={{ color: ensemblePred.precisionByClass.omega !== null && ensemblePred.precisionByClass.omega >= 0.6 ? "#c084fc" : "#f43f5e" }}>
+                          {ensemblePred.precisionByClass.omega !== null ? `${Math.round(ensemblePred.precisionByClass.omega * 100)}%` : "—"}
+                        </span>
+                        <span style={{ color: ensemblePred.recallByClass.omega !== null
+                          ? ensemblePred.recallByClass.omega >= 0.5 ? "#c084fc" : ensemblePred.recallByClass.omega >= 0.4 ? "#facc15" : "#f43f5e"
+                          : "rgba(255,255,255,0.2)" }}>
+                          {ensemblePred.recallByClass.omega !== null ? `${Math.round(ensemblePred.recallByClass.omega * 100)}%` : "—"}
+                        </span>
+                      </div>
                     </div>
                   )}
                 </div>
