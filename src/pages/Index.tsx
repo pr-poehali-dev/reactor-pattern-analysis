@@ -5,6 +5,8 @@ import { predict, getTopPatterns, getSignalDiagnostics } from "@/lib/mlPredictor
 import type { SignalDiagnostic } from "@/lib/mlPredictor";
 import { aiPredict, getThoughtLog, resetAI, saveMemory, loadMemory, clearMemory, hasSavedMemory, getSavedMemoryMeta } from "@/lib/neuralPredictor";
 import { metaPredict } from "@/lib/metaPredictor";
+import { ensemblePredict, recordEnsembleResult, getLastEnsemblePrediction } from "@/lib/ensemblePredictor";
+import type { EnsemblePrediction } from "@/lib/ensemblePredictor";
 import type { RoundResult, FlickerSample, FrameAnalysis } from "@/lib/screenAnalyzer";
 import type { Prediction, Pattern } from "@/lib/mlPredictor";
 import type { AIPrediction, AIThought } from "@/lib/neuralPredictor";
@@ -57,6 +59,8 @@ export default function Index() {
   const [roundPhase, setRoundPhase] = useState<"idle" | "flicker" | "result">("idle");
   const [countdown, setCountdown] = useState<number>(30);
   const [patterns, setPatterns] = useState<Pattern[]>([]);
+  const [ensemblePred, setEnsemblePred] = useState<EnsemblePrediction | null>(null);
+  const ensemblePrevMethodsRef = useRef<EnsemblePrediction["methods"] | null>(null);
   const [liveTime, setLiveTime] = useState(new Date());
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -330,6 +334,14 @@ export default function Index() {
           setPrediction(nextPred);
           setPatterns(getTopPatterns(next));
           setSignalDiagnostics(getSignalDiagnostics());
+
+          // Ансамбль: записываем точность предыдущего раунда, строим новый прогноз
+          if (ensemblePrevMethodsRef.current) {
+            recordEnsembleResult(frame.winner, ensemblePrevMethodsRef.current);
+          }
+          const ensResult = ensemblePredict(next, flickerStats.bias, flickerStats.rate);
+          ensemblePrevMethodsRef.current = ensResult.methods;
+          setEnsemblePred(ensResult);
 
           // ИИ: обучаем на реальном победителе, строим следующий прогноз и сохраняем в ref
           const aiResult = aiPredict(next, flickerStats.bias, flickerStats.rate, flickerStats.switchCount, frame.winner);
@@ -1105,6 +1117,143 @@ export default function Index() {
               </div>
             )}
 
+            {/* ── АНСАМБЛЬ 5 МЕТОДОВ ── */}
+            {ensemblePred && ensemblePred.reactor && (
+              <div className="glass-card rounded-xl overflow-hidden border"
+                style={{ borderColor: "rgba(251,146,60,0.3)", background: "rgba(251,146,60,0.03)" }}>
+
+                {/* Заголовок */}
+                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(251,146,60,0.12)" }}>
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-60"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
+                    </span>
+                    <span className="font-display text-xs tracking-widest text-orange-400/80 uppercase">Ансамбль — 5 методов</span>
+                  </div>
+                  {ensemblePred.accuracy !== null && (
+                    <span className="font-mono text-xs"
+                      style={{ color: ensemblePred.accuracy >= 0.6 ? "#fb923c" : ensemblePred.accuracy >= 0.4 ? "#facc15" : "#f43f5e" }}>
+                      точность: {Math.round(ensemblePred.accuracy * 100)}%
+                    </span>
+                  )}
+                </div>
+
+                {/* Главный прогноз */}
+                <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                  <div>
+                    <p className="font-mono text-xs text-white/25 uppercase tracking-widest mb-1.5">Ансамблевый прогноз</p>
+                    <ReactorBadge reactor={ensemblePred.reactor} size="lg" />
+                    <p className="font-mono text-xs text-orange-300/40 mt-1.5">лидер: {ensemblePred.bestMethod}</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="font-display text-4xl" style={{ color: "#fb923c", textShadow: "0 0 20px #fb923c88" }}>
+                      {Math.round(ensemblePred.confidence * 100)}%
+                    </p>
+                    <p className="font-mono text-xs text-white/25 mt-0.5">уверенность</p>
+                  </div>
+                </div>
+
+                {/* Голоса методов */}
+                <div className="px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                  <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>ГОЛОСА МЕТОДОВ</p>
+                  <div className="grid grid-cols-5 gap-2">
+                    {ensemblePred.methods.map(m => {
+                      const nameMap: Record<string, string> = {
+                        markov: "Марков", lz: "LZ", rf: "RF", gbm: "GBM", knn: "kNN"
+                      };
+                      const w = ensemblePred.ensembleWeights[m.name] ?? 1;
+                      return (
+                        <div key={m.name} className="text-center">
+                          <div className="text-xs font-mono mb-1" style={{
+                            color: !m.available ? "#ffffff20" : m.reactor === "alpha" ? "#22d3ee" : "#c084fc",
+                            opacity: m.available ? 1 : 0.3,
+                          }}>
+                            {m.available ? (m.reactor === "alpha" ? "α" : "ω") : "—"}
+                          </div>
+                          <p className="font-mono text-white/30" style={{ fontSize: 8 }}>{nameMap[m.name]}</p>
+                          <p className="font-mono text-white/20" style={{ fontSize: 8 }}>×{w.toFixed(1)}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Диагностика */}
+                <div className="px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                  <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>МАТРИЦА ОШИБОК</p>
+                  <div className="grid grid-cols-2 gap-1 font-mono" style={{ fontSize: 9 }}>
+                    <div className="text-center px-2 py-1 rounded" style={{ background: "rgba(34,211,238,0.08)", color: "#22d3ee" }}>
+                      α→α ✓ {ensemblePred.confusionMatrix.alphaAlpha}
+                    </div>
+                    <div className="text-center px-2 py-1 rounded" style={{ background: "rgba(244,63,94,0.08)", color: "#f43f5e" }}>
+                      α→ω ✗ {ensemblePred.confusionMatrix.alphaOmega}
+                    </div>
+                    <div className="text-center px-2 py-1 rounded" style={{ background: "rgba(244,63,94,0.08)", color: "#f43f5e" }}>
+                      ω→α ✗ {ensemblePred.confusionMatrix.omegaAlpha}
+                    </div>
+                    <div className="text-center px-2 py-1 rounded" style={{ background: "rgba(192,132,252,0.08)", color: "#c084fc" }}>
+                      ω→ω ✓ {ensemblePred.confusionMatrix.omegaOmega}
+                    </div>
+                  </div>
+                  {(ensemblePred.accuracyByClass.alpha !== null || ensemblePred.accuracyByClass.omega !== null) && (
+                    <div className="flex gap-4 mt-2 font-mono" style={{ fontSize: 9 }}>
+                      {ensemblePred.accuracyByClass.alpha !== null && (
+                        <span style={{ color: "#22d3ee" }}>α: {Math.round(ensemblePred.accuracyByClass.alpha * 100)}%</span>
+                      )}
+                      {ensemblePred.accuracyByClass.omega !== null && (
+                        <span style={{ color: "#c084fc" }}>ω: {Math.round(ensemblePred.accuracyByClass.omega * 100)}%</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Важность признаков (топ 5) */}
+                {ensemblePred.featureImportance.length > 0 && (
+                  <div className="px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                    <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>ТОП ПРИЗНАКОВ (RF)</p>
+                    <div className="space-y-1.5">
+                      {ensemblePred.featureImportance.slice(0, 5).map(f => (
+                        <div key={f.name} className="flex items-center gap-2">
+                          <span className="font-mono text-white/30 flex-1 truncate" style={{ fontSize: 9 }}>{f.label}</span>
+                          <div className="w-20 h-1 rounded-full bg-white/5 overflow-hidden">
+                            <div className="h-full rounded-full" style={{
+                              width: `${f.importance * 100}%`,
+                              background: "linear-gradient(90deg, #fb923c, #fbbf24)",
+                            }} />
+                          </div>
+                          <span className="font-mono text-orange-400/70 w-8 text-right" style={{ fontSize: 9 }}>
+                            {Math.round(f.importance * 100)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Кривая точности по блокам */}
+                {ensemblePred.recentAccuracyCurve.length >= 2 && (
+                  <div className="px-4 py-3">
+                    <p className="font-mono text-white/20 mb-2" style={{ fontSize: 9, letterSpacing: "0.1em" }}>ТОЧНОСТЬ ПО ВРЕМЕНИ (блоки 10 раундов)</p>
+                    <div className="flex items-end gap-1" style={{ height: 28 }}>
+                      {ensemblePred.recentAccuracyCurve.map((v, i) => (
+                        <div key={i} className="flex-1 rounded-sm"
+                          style={{
+                            height: `${Math.max(4, v * 100)}%`,
+                            background: v >= 0.6 ? "#fb923c" : v >= 0.4 ? "#facc15" : "#f43f5e",
+                            opacity: 0.4 + (i / ensemblePred.recentAccuracyCurve.length) * 0.6,
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex justify-between mt-1 font-mono text-white/15" style={{ fontSize: 8 }}>
+                      <span>начало</span><span>сейчас</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── МЕТАПРЕДИКТОР ── */}
             {metaPrediction && metaPrediction.mode !== "insufficient" && (
               <div className="glass-card rounded-xl overflow-hidden border"
@@ -1379,8 +1528,8 @@ export default function Index() {
           <div className="space-y-5 animate-fade-in-up">
             <div className="grid sm:grid-cols-3 gap-4">
               {[
-                { label: "Алгоритм", value: "Markov", sub: "+ Flicker Analysis", color: "text-neon-green", icon: "Cpu" },
-                { label: "Окно паттернов", value: "2–5", sub: "последних раундов", color: "text-cyan-400", icon: "GitBranch" },
+                { label: "Алгоритм", value: "Ансамбль", sub: "Марков · LZ · RF · GBM · kNN", color: "text-neon-green", icon: "Cpu" },
+                { label: "Окно паттернов", value: "2–6", sub: "авто K-подбор", color: "text-cyan-400", icon: "GitBranch" },
                 { label: "Раундов обработано", value: totalRounds, sub: "из захвата экрана", color: "text-purple-400", icon: "Database" },
               ].map(s => (
                 <div key={s.label} className="glass-card rounded-xl p-5 text-center">

@@ -4,8 +4,24 @@ import path from "path";
 import {componentTagger} from "pp-tagger";
 
 // https://vitejs.dev/config/
+const hmrKeepalive = {
+    name: 'hmr-ws-keepalive',
+    configureServer(server: any) {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const tick = () => {
+            server.ws?.send({type: 'ping'});
+            timer = setTimeout(tick, 5000 + Math.floor(Math.random() * 4000));
+        };
+        timer = setTimeout(tick, 5000 + Math.floor(Math.random() * 4000));
+        server.httpServer?.on('close', () => {
+            if (timer) clearTimeout(timer);
+        });
+    },
+};
+
 export default defineConfig(({mode}) => ({
     plugins: [
+        hmrKeepalive,
         react(),
         mode === 'development' &&
         componentTagger(),
@@ -20,6 +36,7 @@ export default defineConfig(({mode}) => ({
         port: 5173,
         allowedHosts: true,
         hmr: {
+            timeout: 7000,
             overlay: false // Disables the error overlay if you only want console errors
         }
     },
