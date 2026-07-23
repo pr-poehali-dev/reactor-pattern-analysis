@@ -912,12 +912,44 @@ export default function Index() {
                     <p className="font-mono text-xs text-white/25 uppercase tracking-widest mb-1.5">Ансамблевый прогноз</p>
                     <ReactorBadge reactor={ensemblePred.reactor} size="lg" />
                     <p className="font-mono text-xs text-orange-300/40 mt-1.5">лидер: {ensemblePred.bestMethod}</p>
+                    {ensemblePred.antiCrowdActive && (
+                      <p className="font-mono text-xs mt-1" style={{ color: "#fbbf24" }}>⚡ развернуто против толпы</p>
+                    )}
                   </div>
                   <div className="text-center">
                     <p className="font-display text-4xl" style={{ color: "#fb923c", textShadow: "0 0 20px #fb923c88" }}>
                       {Math.round(ensemblePred.confidence * 100)}%
                     </p>
                     <p className="font-mono text-xs text-white/25 mt-0.5">уверенность</p>
+                  </div>
+                </div>
+
+                {/* Anti-crowding: стадное мышление */}
+                <div className="px-4 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.04)" }}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="font-mono text-white/20" style={{ fontSize: 9, letterSpacing: "0.1em" }}>КОНСЕНСУС МЕТОДОВ (СТАДНОЕ МЫШЛЕНИЕ)</p>
+                    {ensemblePred.extremeConsensus && (
+                      <span className="font-mono px-1.5 py-0.5 rounded" style={{ fontSize: 8, background: "rgba(251,146,60,0.12)", color: "#fb923c", border: "1px solid rgba(251,146,60,0.3)" }}>
+                        экстремальный
+                      </span>
+                    )}
+                  </div>
+                  <div className="h-1.5 rounded-full bg-white/5 overflow-hidden mb-1.5">
+                    <div className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${ensemblePred.crowdConsensus * 100}%`,
+                        background: ensemblePred.crowdConsensus >= 0.8 ? "linear-gradient(90deg,#fb923c,#f43f5e)" : "linear-gradient(90deg,#38bdf8,#00ffcc)",
+                      }} />
+                  </div>
+                  <div className="flex items-center justify-between font-mono" style={{ fontSize: 9 }}>
+                    <span className="text-white/30">согласны: {Math.round(ensemblePred.crowdConsensus * 100)}%</span>
+                    {ensemblePred.crowdReversalRate !== null ? (
+                      <span style={{ color: ensemblePred.crowdReversalRate > 0.55 ? "#fbbf24" : "#38bdf8" }}>
+                        экстрим-консенсус ошибался {Math.round(ensemblePred.crowdReversalRate * 100)}% ({ensemblePred.crowdSamples} набл.)
+                      </span>
+                    ) : (
+                      <span className="text-white/15">копим статистику ({ensemblePred.crowdSamples}/8)</span>
+                    )}
                   </div>
                 </div>
 

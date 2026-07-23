@@ -43,6 +43,12 @@ export interface EnsemblePrediction {
   recentAccuracyCurve: number[]; // точность по блокам по 10 раундов
   accuracy: number | null; // общая точность ансамбля
   omegaPenaltyActive: boolean; // штраф ×2 за ошибку на Омегу
+  // ── Anti-crowding (стадное мышление) ──────────────────
+  crowdConsensus: number;        // 0..1: доля методов согласных с большинством
+  extremeConsensus: boolean;     // консенсус экстремальный (>=80% методов + сильная уверенность)
+  antiCrowdActive: boolean;      // применена ли поправка "против толпы" в этом раунде
+  crowdReversalRate: number | null; // как часто экстремальный консенсус оказывался ошибочным (история)
+  crowdSamples: number;          // сколько раундов с экстремальным консенсусом накоплено
 }
 
 export interface ConfusionMatrix {
@@ -619,6 +625,38 @@ function recordMethodResult(key: MethodKey, hit: boolean) {
   if (methodHistory[key].length > MAX_METHOD_HISTORY) methodHistory[key].shift();
 }
 
+// ──────────────── Anti-crowding (стадное мышление) ─────────
+//
+// Наблюдение: если платформа намеренно разворачивает исход против
+// большинства ставок (чтобы "сжечь" крупные ставки толпы), то самые
+// уверенные/единодушные прогнозы ансамбля будут регулярно ошибаться.
+// Мы НЕ считаем это как факт, а измеряем это статистически: копим
+// историю "экстремальных консенсусов" (>=80% методов согласны + сильная
+// вероятность) и смотрим, как часто такой консенсус оказывался неверным.
+// Если ошибочность систематически выше 50% — считаем это сигналом и
+// частично (не более 60%) разворачиваем прогноз пропорционально силе эффекта.
+// Если манипуляции нет — реальная ошибочность колеблется около случайного
+// уровня и поправка сама себя гасит (antiCrowdActive не активируется).
+
+const CROWD_EXTREME_THRESHOLD = 0.8; // доля методов, согласных с большинством
+const CROWD_STRONG_PROB = 0.3;       // |prob-0.5| >= 0.3 → "сильная" уверенность
+const CROWD_MIN_METHODS = 3;         // минимум доступных методов для оценки консенсуса
+const MAX_CROWD_HISTORY = 100;
+const MIN_CROWD_SAMPLES = 8;         // минимум наблюдений экстремального консенсуса
+const ANTI_CROWD_MAX_PULL = 0.6;     // максимум 60% разворота к противоположному классу
+
+const crowdHistory: boolean[] = []; // true = экстремальный консенсус был ошибочным
+
+function recordCrowdResult(wrong: boolean) {
+  crowdHistory.push(wrong);
+  if (crowdHistory.length > MAX_CROWD_HISTORY) crowdHistory.shift();
+}
+
+function crowdReversalRate(): number | null {
+  if (crowdHistory.length < MIN_CROWD_SAMPLES) return null;
+  return crowdHistory.filter(Boolean).length / crowdHistory.length;
+}
+
 // Валидационные веса: точность на последних 20% истории (но минимум 8 раундов)
 // LZ максимально ограничен до 0.2 (п.4)
 const LZ_MAX_WEIGHT = 0.2;
@@ -691,6 +729,13 @@ export function recordEnsembleResult(
     if (METHOD_KEYS.includes(key)) {
       recordMethodResult(key, m.reactor === actual);
     }
+  }
+
+  // Anti-crowding: если предыдущий раунд был "экстремальным консенсусом" —
+  // фиксируем, оказался ли он ошибочным (это и есть проверка гипотезы
+  // "толпу разворачивают, когда она слишком уверена")
+  if (lastEnsemblePrediction?.extremeConsensus) {
+    recordCrowdResult(lastEnsemblePrediction.reactor !== actual);
   }
 }
 
@@ -822,8 +867,35 @@ export function ensemblePredict(
     && history.filter(r => r.predictionHit !== null).length >= 10;
   const _threshold = _penaltyNow ? 0.42 : 0.5;
 
-  const reactor: Reactor = ensembleProb >= _threshold ? "alpha" : "omega";
-  const rawConf = Math.max(ensembleProb, 1 - ensembleProb);
+  const rawReactor: Reactor = ensembleProb >= _threshold ? "alpha" : "omega";
+
+  // ── Anti-crowding: определяем степень консенсуса методов ──────
+  const availableMethods = methods.filter(m => m.available);
+  const majorityCount = availableMethods.filter(m => m.reactor === rawReactor).length;
+  const crowdConsensus = availableMethods.length > 0 ? majorityCount / availableMethods.length : 0;
+  const strongProb = Math.abs(ensembleProb - 0.5) >= CROWD_STRONG_PROB;
+  const extremeConsensus = availableMethods.length >= CROWD_MIN_METHODS
+    && crowdConsensus >= CROWD_EXTREME_THRESHOLD
+    && strongProb;
+
+  // Историческая частота, с которой экстремальный консенсус оказывался неверным
+  const reversalRate = crowdReversalRate();
+  // Активируем поправку только если реально накопилась статистика "толпу разворачивают"
+  // (ошибочность экстремального консенсуса значимо выше 50%)
+  const antiCrowdActive = extremeConsensus && reversalRate !== null && reversalRate > 0.55;
+
+  let reactor: Reactor = rawReactor;
+  let adjustedProb = ensembleProb;
+  if (antiCrowdActive && reversalRate !== null) {
+    // Сила разворота пропорциональна тому, насколько ошибочность выше 50%,
+    // ограничена ANTI_CROWD_MAX_PULL чтобы не переворачивать вслепую
+    const pull = Math.min(ANTI_CROWD_MAX_PULL, (reversalRate - 0.5) * 2);
+    adjustedProb = ensembleProb + (0.5 - ensembleProb) * pull * 2;
+    adjustedProb = Math.max(0.02, Math.min(0.98, adjustedProb));
+    reactor = adjustedProb >= _threshold ? "alpha" : "omega";
+  }
+
+  const rawConf = Math.max(adjustedProb, 1 - adjustedProb);
   const confidence = Math.min(0.93, 0.5 + (rawConf - 0.5) * 1.6);
 
   // Лучший метод по весу
@@ -867,7 +939,6 @@ export function ensemblePredict(
   // что равнозначно увеличению стоимости ошибки FN(Omega) в 2 раза
   const omegaRecall = recallByClass.omega;
   const omegaPenaltyActive = omegaRecall !== null && omegaRecall < 0.4 && totalPredicted >= 10;
-  const threshold = omegaPenaltyActive ? 0.42 : 0.5; // сдвигаем порог → больше предсказаний Omega
 
   // Важность признаков из RF
   const featureImportance: FeatureImportance[] = rfCache.forest
@@ -892,7 +963,8 @@ export function ensemblePredict(
     .map(m => `${methodNames[m.name]}:${m.reactor === "alpha" ? "α" : "ω"}`)
     .join(" ");
 
-  const reason = `${voteSummary} → ансамбль:${reactor === "alpha" ? "α" : "ω"} (${Math.round(confidence * 100)}%)`;
+  const antiCrowdNote = antiCrowdActive ? ` ⚡против толпы (развернуто, консенсус ${Math.round(crowdConsensus * 100)}% был неверен в ${Math.round((reversalRate ?? 0) * 100)}% случаев)` : "";
+  const reason = `${voteSummary} → ансамбль:${reactor === "alpha" ? "α" : "ω"} (${Math.round(confidence * 100)}%)${antiCrowdNote}`;
 
   const ensembleWeightsDisplay: Record<string, number> = {};
   for (const key of METHOD_KEYS) ensembleWeightsDisplay[key] = Math.round(weights[key] * 100) / 100;
@@ -912,6 +984,11 @@ export function ensemblePredict(
     recentAccuracyCurve: accuracyCurve,
     accuracy,
     omegaPenaltyActive,
+    crowdConsensus,
+    extremeConsensus,
+    antiCrowdActive,
+    crowdReversalRate: reversalRate,
+    crowdSamples: crowdHistory.length,
   };
 
   lastEnsemblePrediction = result;
